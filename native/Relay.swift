@@ -1,12 +1,13 @@
 import CryptoKit
 import Foundation
+import JOSESwift
 
 @MainActor
 final class Relay {
     private let base: URL
     private let room: String
     private let writer: String
-    private let key: SymmetricKey
+    private let key: CryptoKit.SymmetricKey
     let viewerURL: URL
     private var socket: URLSessionWebSocketTask?
     private var sequence = 0
@@ -21,11 +22,12 @@ final class Relay {
         self.base = base
         self.room = room
         self.writer = writer
-        key = SymmetricKey(size: .bits256)
+        key = CryptoKit.SymmetricKey(size: .bits256)
         var viewer = URLComponents(url: base, resolvingAgainstBaseURL: false)!
         viewer.path = "/"
         viewer.query = nil
-        viewer.fragment = "\(room).\(reader).\(key.withUnsafeBytes { Data($0) }.base64url)"
+        viewer.fragment =
+            "\(room).\(reader).\(key.withUnsafeBytes { Data($0) }.base64URLEncodedString())"
         viewerURL = viewer.url!
     }
     static func create(url: String) async throws -> Relay {
@@ -40,8 +42,8 @@ final class Relay {
         guard (response as? HTTPURLResponse)?.statusCode == 200,
             let json = try JSONSerialization.jsonObject(with: data) as? [String: String],
             let room = json["id"], let writer = json["writer"], let reader = json["reader"],
-            UUID(uuidString: room) != nil, Data(base64url: writer)?.count == 32,
-            Data(base64url: reader)?.count == 32
+            UUID(uuidString: room) != nil, Data(base64URLEncoded: writer)?.count == 32,
+            Data(base64URLEncoded: reader)?.count == 32
         else { throw AppFailure.failed }
         let relay = Relay(base: base, room: room, writer: writer, reader: reader)
         do {

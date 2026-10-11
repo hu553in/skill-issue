@@ -32,9 +32,9 @@ export default defineConfig({
       },
     },
     {
-      files: ["web/main.tsx", "web/session.ts", "relay/worker.ts"],
+      files: ["web/main.tsx", "relay/worker.ts"],
       rules: {
-        // Keep schema validation and ordered protocol transitions together.
+        // Keep ordered protocol transitions together.
         complexity: "off",
       },
     },
@@ -46,7 +46,7 @@ export default defineConfig({
       },
     },
     {
-      files: ["checks/protocol.test.ts"],
+      files: ["checks/protocol.test.ts", "checks/worker.test.ts"],
       rules: {
         // In-memory fixtures implement async platform APIs without I/O.
         "require-await": "off",
@@ -55,6 +55,7 @@ export default defineConfig({
     {
       files: [
         "checks/protocol.test.ts",
+        "checks/worker.test.ts",
         "checks/relay.ts",
         "checks/e2e/native.spec.ts",
         "checks/e2e/peer.ts",

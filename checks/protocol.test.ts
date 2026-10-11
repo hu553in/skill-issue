@@ -1,8 +1,18 @@
 import { expect, mock, test } from "bun:test";
 
+import { base64 } from "@scure/base";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { safeParse } from "valibot";
 
+import {
+  AckPacketSchema,
+  AuthMessageSchema,
+  maxPacketLength,
+  parseViewerMessage,
+  StatePacketSchema,
+  ViewStateSchema,
+} from "../protocol";
 import { Answer } from "../web/Answer";
 import {
   cancelScroll,
@@ -12,12 +22,149 @@ import {
 } from "../web/reading";
 import {
   acknowledgment,
-  base64,
   decrypt,
   empty,
   parseLink,
   unbase64,
 } from "../web/session";
+
+test("base64 decoding retains standard, URL-safe, padding and ASCII whitespace encodings", () => {
+  const vectors = [
+    { alternate: "", bytes: [], encoded: "" },
+    { alternate: "Zg", bytes: [102], encoded: "Zg==" },
+    { alternate: "Zm8", bytes: [102, 111], encoded: "Zm8=" },
+    { alternate: "Zm9v", bytes: [102, 111, 111], encoded: "Zm9v" },
+    { alternate: "-_8", bytes: [251, 255], encoded: "+/8=" },
+  ];
+  for (const { bytes, encoded, alternate } of vectors) {
+    const expected = new Uint8Array(bytes);
+    expect(unbase64(encoded)).toEqual(expected);
+    expect(unbase64(alternate)).toEqual(expected);
+    expect(unbase64(`\t${encoded}\n\f\r `)).toEqual(expected);
+  }
+  expect(unbase64("-_8=")).toEqual(new Uint8Array([251, 255]));
+  expect(unbase64("Zh==")).toEqual(new Uint8Array([102]));
+  expect(unbase64("Zm9=")).toEqual(new Uint8Array([102, 111]));
+  expect(unbase64("/x==")).toEqual(new Uint8Array([255]));
+  for (const invalid of ["Z", "Zg=", "Zg===", "Z=g=", "@@@@", "Zg==\u00A0"]) {
+    expect(() => unbase64(invalid)).toThrow();
+  }
+});
+
+test("decrypted snapshots reject invalid domain fields without coercion", () => {
+  const valid = {
+    ...empty,
+    answers: [{ id: "answer", status: "complete", text: "Answer text" }],
+    command: { answerID: null, direction: -1, id: 1 },
+    selectedID: null,
+  };
+  expect(safeParse(ViewStateSchema, valid).success).toBe(true);
+  expect(safeParse(ViewStateSchema, { ...empty, command: null }).success).toBe(
+    true
+  );
+  const invalid = [
+    { version: 2 },
+    { live: "true" },
+    { answers: null },
+    { answers: [null] },
+    { answers: [{ id: 1, status: "complete", text: "text" }] },
+    { answers: [{ id: "a", status: "done", text: "text" }] },
+    { answers: [{ id: "a", status: "complete", text: [] }] },
+    { selectedID: 1 },
+    { selection: -1 },
+    { selection: 1.5 },
+    { selection: Number.MAX_SAFE_INTEGER + 1 },
+    { fontSize: 15 },
+    { fontSize: 41 },
+    { fontSize: "20" },
+    { fontSize: Number.POSITIVE_INFINITY },
+    { language: null },
+    { modifiers: 1 },
+    { error: false },
+    { command: false },
+    { command: { direction: 1, id: 0 } },
+    { command: { direction: 1, id: 1.5 } },
+    { command: { direction: 0, id: 1 } },
+    { command: { answerID: 1, direction: 1, id: 1 } },
+  ];
+  for (const fields of invalid) {
+    expect(safeParse(ViewStateSchema, { ...valid, ...fields }).success).toBe(
+      false
+    );
+  }
+});
+
+test("protocol schemas preserve ignored extensions and enforce recognized packet bounds", () => {
+  for (const type of ["future", null, 1, { future: true }, []]) {
+    expect(parseViewerMessage({ type })).toBeUndefined();
+  }
+  for (const invalid of [
+    null,
+    [],
+    {},
+    { type: undefined },
+    { type: "ready" },
+    { box: "AAAA", seq: "1", type: "state" },
+  ]) {
+    expect(() => parseViewerMessage(invalid)).toThrow();
+  }
+  expect(
+    parseViewerMessage({ client: "viewer", extra: true, type: "ready" })
+  ).toEqual({ client: "viewer", type: "ready" });
+  expect(parseViewerMessage({ extra: true, type: "ended" })).toEqual({
+    type: "ended",
+  });
+  expect(
+    safeParse(AuthMessageSchema, { role: "reader", token: "", type: "auth" })
+      .success
+  ).toBe(true);
+  for (const fields of [
+    { role: "owner" },
+    { token: 1 },
+    { token: "a".repeat(101) },
+  ]) {
+    expect(
+      safeParse(AuthMessageSchema, {
+        role: "reader",
+        token: "token",
+        type: "auth",
+        ...fields,
+      }).success
+    ).toBe(false);
+  }
+  expect(
+    safeParse(StatePacketSchema, {
+      box: "A".repeat(maxPacketLength),
+      seq: 1,
+      type: "state",
+    }).success
+  ).toBe(true);
+  for (const fields of [
+    { seq: 0 },
+    { seq: 1.5 },
+    { seq: Number.MAX_SAFE_INTEGER + 1 },
+    { box: "-_8=" },
+    { box: "AA AA" },
+    { box: "A".repeat(maxPacketLength + 1) },
+  ]) {
+    expect(
+      safeParse(StatePacketSchema, {
+        box: "AAAA",
+        seq: 1,
+        type: "state",
+        ...fields,
+      }).success
+    ).toBe(false);
+  }
+  expect(
+    safeParse(AckPacketSchema, { box: "A".repeat(1024), seq: 1, type: "ack" })
+      .success
+  ).toBe(true);
+  expect(
+    safeParse(AckPacketSchema, { box: "A".repeat(1025), seq: 1, type: "ack" })
+      .success
+  ).toBe(false);
+});
 
 test("encrypted history authenticates room, sequence and version", async () => {
   const key = await crypto.subtle.generateKey(
@@ -53,7 +200,7 @@ test("encrypted history authenticates room, sequence and version", async () => {
     const combined = new Uint8Array(iv.length + cipher.length);
     combined.set(iv);
     combined.set(cipher, iv.length);
-    return { box: base64(combined), seq: 1, type: "state" as const };
+    return { box: base64.encode(combined), seq: 1, type: "state" as const };
   };
   const packet = await encrypt(state);
   expect(await decrypt(key, "room", packet)).toEqual(state);
@@ -341,10 +488,7 @@ test("room deletion survives both closing and failed open peers", async () => {
       get: async (key: string) => values.get(key),
     },
   };
-  const room = new Room(
-    context as unknown as DurableObjectState,
-    {} as Parameters<typeof worker.fetch>[1]
-  );
+  const room = new Room(context as unknown as DurableObjectState, {} as Env);
   const response = await room.fetch(
     new Request("https://room/rooms/id/end", {
       headers: { Authorization: `Bearer ${token}` },

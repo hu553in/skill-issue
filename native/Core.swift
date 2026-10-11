@@ -8,16 +8,6 @@ let fontSizeRange = 16...40
 let maximumPacket = 4_000_000
 
 extension Data {
-    var base64url: String {
-        base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(
-            of: "/", with: "_"
-        ).replacingOccurrences(of: "=", with: "")
-    }
-    init?(base64url: String) {
-        let value = base64url.replacingOccurrences(of: "-", with: "+").replacingOccurrences(
-            of: "_", with: "/")
-        self.init(base64Encoded: value + String(repeating: "=", count: (4 - value.count % 4) % 4))
-    }
     static func random() -> Data { SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) } }
 }
 
@@ -157,21 +147,4 @@ func encryptedPacket(_ state: ViewState, room: String, sequence: Int, key: Symme
     ])
     guard data.count <= maximumPacket else { throw AppFailure.failed }
     return String(decoding: data, as: UTF8.self)
-}
-
-struct SSEParser {
-    private var data: [String] = []
-    mutating func push(_ line: String) -> String? {
-        if line.isEmpty {
-            guard !data.isEmpty else { return nil }
-            defer { data.removeAll(keepingCapacity: true) }
-            return data.joined(separator: "\n")
-        }
-        if line.hasPrefix("data:") {
-            var value = String(line.dropFirst(5))
-            if value.hasPrefix(" ") { value.removeFirst() }
-            data.append(value)
-        }
-        return nil
-    }
 }

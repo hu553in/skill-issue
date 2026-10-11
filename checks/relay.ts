@@ -1,5 +1,6 @@
-import { base64 } from "../web/session";
-import type { Packet, ViewState } from "../web/session";
+import { base64, base64urlnopad } from "@scure/base";
+
+import type { Packet, ViewState } from "../protocol";
 import { Peer } from "./e2e/peer";
 
 interface RoomCredentials {
@@ -56,10 +57,7 @@ export class RelaySession {
     const bytes = new Uint8Array(
       await crypto.subtle.exportKey("raw", this.key)
     );
-    const secret = base64(bytes)
-      .replaceAll("+", "-")
-      .replaceAll("/", "_")
-      .replaceAll("=", "");
+    const secret = base64urlnopad.encode(bytes);
     return `${this.base}/#${this.room.id}.${this.room.reader}.${secret}`;
   }
 
@@ -95,7 +93,7 @@ export class RelaySession {
     const box = new Uint8Array(iv.length + ciphertext.length);
     box.set(iv);
     box.set(ciphertext, iv.length);
-    const packet: Packet = { box: base64(box), seq, type: "state" };
+    const packet: Packet = { box: base64.encode(box), seq, type: "state" };
     writer.send(packet);
     return packet;
   }

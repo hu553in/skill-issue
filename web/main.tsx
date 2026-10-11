@@ -1,3 +1,4 @@
+import ReconnectingWebSocket from "partysocket/ws";
 import {
   useCallback,
   useEffect,
@@ -9,6 +10,8 @@ import type { CSSProperties } from "react";
 import { createRoot } from "react-dom/client";
 
 import answerLanguages from "../native/Resources/answer-languages.json";
+import { parseViewerMessage } from "../protocol";
+import type { ViewState } from "../protocol";
 import { Answer } from "./Answer";
 import { readingAnchor, restoreAnchor, scrollPage } from "./reading";
 import type { Anchor } from "./reading";
@@ -20,7 +23,6 @@ import {
   parseLink,
   unbase64,
 } from "./session";
-import type { ViewState } from "./session";
 
 import "./style.css";
 
@@ -112,16 +114,13 @@ const App = () => {
     if (!fragment) {
       return;
     }
-    let socket: WebSocket | undefined;
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    let socket: ReconnectingWebSocket | undefined;
     let disposed = false;
     let ended = false;
     let generation = 0;
     let highest = 0;
     let lastReceived = Date.now();
     async function connect() {
-      generation += 1;
-      const run = generation;
       try {
         const { room, token, key: rawKey } = parseLink(fragment);
         const key = await crypto.subtle.importKey(
@@ -131,83 +130,85 @@ const App = () => {
           false,
           ["decrypt", "encrypt"]
         );
-        if (disposed || run !== generation) {
+        if (disposed) {
           return;
         }
         const url = new URL(`/rooms/${room}/socket`, location.origin);
         url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-        const ws = new WebSocket(url);
+        const ws = new ReconnectingWebSocket(url.href, [], {
+          maxEnqueuedMessages: 0,
+          minReconnectionDelay: 1500,
+          shouldReconnectOnClose: (event) =>
+            !disposed && !ended && event.code !== 1008,
+        });
         socket = ws;
         let queue = Promise.resolve();
         let client = "";
         let first = true;
         ws.addEventListener("open", () => {
+          generation += 1;
+          queue = Promise.resolve();
+          client = "";
+          first = true;
+          lastReceived = Date.now();
           ws.send(JSON.stringify({ role: "reader", token, type: "auth" }));
         });
         ws.addEventListener("message", (event: MessageEvent<unknown>) => {
+          if (disposed || ended) {
+            return;
+          }
+          const run = generation;
           lastReceived = Date.now();
+          let packet: ReturnType<typeof parseViewerMessage>;
+          try {
+            if (typeof event.data !== "string") {
+              throw new TypeError(failure);
+            }
+            packet = parseViewerMessage(JSON.parse(event.data));
+            if (packet?.type === "ended") {
+              // Close the transport while retaining final snapshots already in the queue.
+              ended = true;
+              setStatus("Session ended");
+              ws.close();
+              return;
+            }
+          } catch {
+            generation += 1;
+            ended = true;
+            setStatus(failure);
+            ws.close();
+            return;
+          }
+          if (!packet) {
+            return;
+          }
           queue = queue
             .then(async () => {
               if (disposed || run !== generation) {
                 return;
               }
-              const { data } = event;
-              if (typeof data !== "string") {
-                throw new TypeError(failure);
-              }
-              const packet: unknown = JSON.parse(data);
-              if (
-                typeof packet !== "object" ||
-                packet === null ||
-                !("type" in packet)
-              ) {
-                throw new Error(failure);
-              }
               if (packet.type === "ready") {
-                if (
-                  !("client" in packet) ||
-                  typeof packet.client !== "string"
-                ) {
-                  throw new Error(failure);
-                }
                 ({ client } = packet);
-                if (ws.readyState === WebSocket.OPEN) {
+                if (!ended && ws.readyState === WebSocket.OPEN) {
                   setStatus("Connected");
                 }
                 return;
               }
               if (packet.type === "offline") {
-                if (ws.readyState === WebSocket.OPEN) {
+                if (!ended && ws.readyState === WebSocket.OPEN) {
                   setStatus("Mac disconnected");
                 }
-                return;
-              }
-              if (packet.type === "ended") {
-                ended = true;
-                setStatus("Session ended");
                 return;
               }
               if (packet.type !== "state") {
                 return;
               }
-              if (
-                !("seq" in packet) ||
-                typeof packet.seq !== "number" ||
-                !("box" in packet) ||
-                typeof packet.box !== "string"
-              ) {
-                throw new Error(failure);
-              }
-              const { box, seq } = packet;
+              const { seq } = packet;
               if (seq < highest) {
                 return;
               }
-              const next = await decrypt(key, room, {
-                box,
-                seq,
-                type: "state",
-              });
-              if (disposed || ended || run !== generation) {
+              const next = await decrypt(key, room, packet);
+              if (disposed || run !== generation) {
                 return;
               }
               const reconnect = first;
@@ -217,9 +218,18 @@ const App = () => {
               await new Promise<void>((resolve) => {
                 setUpdate({
                   applied: (appliedCommand) => {
+                    if (disposed || ended || run !== generation) {
+                      resolve();
+                      return;
+                    }
                     void acknowledgment(key, room, client, seq, appliedCommand)
                       .then((ack) => {
-                        if (ws.readyState === WebSocket.OPEN) {
+                        if (
+                          !disposed &&
+                          !ended &&
+                          run === generation &&
+                          ws.readyState === WebSocket.OPEN
+                        ) {
                           ws.send(ack);
                         }
                       })
@@ -234,6 +244,7 @@ const App = () => {
               });
               if (
                 !disposed &&
+                !ended &&
                 run === generation &&
                 ws.readyState === WebSocket.OPEN
               ) {
@@ -241,7 +252,8 @@ const App = () => {
               }
             })
             .catch(() => {
-              if (!disposed && run === generation) {
+              if (!disposed && !ended && run === generation) {
+                generation += 1;
                 ended = true;
                 setStatus(failure);
                 ws.close();
@@ -249,21 +261,20 @@ const App = () => {
             });
         });
         ws.addEventListener("close", (event) => {
-          if (disposed || ended || run !== generation) {
+          if (disposed || ended) {
             return;
           }
+          generation += 1;
           if (event.code === 1008) {
             ended = true;
             setStatus(failure);
             return;
           }
           setStatus("Reconnecting…");
-          timer = setTimeout(() => {
-            void connect();
-          }, 1500);
         });
       } catch {
-        if (!disposed && run === generation) {
+        if (!disposed) {
+          ended = true;
           setStatus(failure);
         }
       }
@@ -276,7 +287,7 @@ const App = () => {
         document.visibilityState === "visible" &&
         Date.now() - lastReceived > 35_000
       ) {
-        socket?.close();
+        socket?.reconnect();
       }
     }, 10_000);
     const visibility = () => {
@@ -285,14 +296,12 @@ const App = () => {
         !ended &&
         socket?.readyState === WebSocket.CLOSED
       ) {
-        clearTimeout(timer);
-        void connect();
+        socket.reconnect();
       }
     };
     document.addEventListener("visibilitychange", visibility);
     return () => {
       disposed = true;
-      clearTimeout(timer);
       clearInterval(watchdog);
       document.removeEventListener("visibilitychange", visibility);
       socket?.close();

@@ -1,12 +1,13 @@
 import AudioCommon
 import CryptoKit
 import Foundation
+import JOSESwift
 import Testing
 
 @testable import SkillIssue
 
-@Test func encryptedSnapshotAndEventStream() throws {
-    let key = SymmetricKey(size: .bits256)
+@Test func encryptedSnapshot() throws {
+    let key = CryptoKit.SymmetricKey(size: .bits256)
     let state = ViewState(
         live: true, answers: [AnswerCard(id: "a", text: "A private answer", status: "complete")],
         selectedID: "a")
@@ -20,19 +21,29 @@ import Testing
     #expect(throws: (any Error).self) {
         try AES.GCM.open(box, using: key, authenticating: Data("room:8".utf8))
     }
-    var parser = SSEParser()
-    for line in [
-        ": heartbeat", "event: response.output_text.delta",
-        "data: {\"type\":\"response.output_text.delta\",", "data: \"delta\":\"Hello\"}",
-    ] {
-        let pending = parser.push(line)
-        #expect(pending == nil)
+}
+
+@Test func base64URLWireVectors() {
+    let vectors: [(Data, String)] = [
+        (Data(), ""), (Data("f".utf8), "Zg"), (Data("fo".utf8), "Zm8"),
+        (Data("foo".utf8), "Zm9v"), (Data("foob".utf8), "Zm9vYg"),
+        (Data("fooba".utf8), "Zm9vYmE"), (Data("foobar".utf8), "Zm9vYmFy"),
+        (Data([0xfb, 0xef, 0xff]), "--__"),
+    ]
+    for (bytes, encoded) in vectors {
+        #expect(bytes.base64URLEncodedString() == encoded)
+        #expect(Data(base64URLEncoded: encoded) == bytes)
     }
-    let emitted = parser.push("")
-    let event = try #require(emitted)
-    let parsed = try #require(
-        JSONSerialization.jsonObject(with: Data(event.utf8)) as? [String: String])
-    #expect(parsed["delta"] == "Hello")
+    #expect(Data(base64URLEncoded: "Zg==") == Data("f".utf8))
+    #expect(Data(base64URLEncoded: "Zm8=") == Data("fo".utf8))
+    for invalid in ["a", "%%%", "AA===", "-", "___?", "🐢"] {
+        #expect(Data(base64URLEncoded: invalid) == nil)
+    }
+    // RFC 7636, Appendix B: the same SHA-256 and URL alphabet used for OAuth PKCE.
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+    #expect(
+        Data(SHA256.hash(data: Data(verifier.utf8))).base64URLEncodedString()
+            == "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM")
 }
 
 @Test func historyInputAndViewerCommands() throws {

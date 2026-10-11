@@ -1,30 +1,13 @@
-interface AnswerCard {
-  id: string;
-  text: string;
-  status: "generating" | "complete" | "incomplete" | "failed";
-}
-interface ViewerCommand {
-  id: number;
-  answerID?: string | null;
-  direction: number;
-}
-export interface ViewState {
-  version: number;
-  live: boolean;
-  answers: AnswerCard[];
-  selectedID?: string | null;
-  selection: number;
-  command?: ViewerCommand | null;
-  fontSize: number;
-  language: string;
-  modifiers: string;
-  error: string;
-}
-export interface Packet {
-  type: "state";
-  seq: number;
-  box: string;
-}
+import { base64 } from "@scure/base";
+import * as v from "valibot";
+
+import type { Packet, ViewState } from "../protocol";
+import {
+  StatePacketSchema,
+  ViewerLinkSchema,
+  ViewStateSchema,
+} from "../protocol";
+
 export const empty: ViewState = {
   answers: [],
   error: "",
@@ -42,46 +25,23 @@ export const unbase64 = (text: string) =>
     // oxlint-disable-next-line unicorn/prefer-code-point
     c.charCodeAt(0)
   );
-export const base64 = (bytes: Uint8Array) => {
-  let value = "";
-  for (let i = 0; i < bytes.length; i += 8192) {
-    value += String.fromCodePoint(...bytes.subarray(i, i + 8192));
-  }
-  return btoa(value);
-};
 export function parseLink(fragment: string) {
-  const parts = fragment.replace(/^#/u, "").split(".");
-  const [room, token, key] = parts;
-  if (
-    parts.length !== 3 ||
-    room === undefined ||
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(
-      room
-    ) ||
-    token === undefined ||
-    !/^[\w-]{43}$/u.test(token) ||
-    key === undefined ||
-    !/^[\w-]{43}$/u.test(key)
-  ) {
+  const result = v.safeParse(
+    ViewerLinkSchema,
+    fragment.replace(/^#/u, "").split(".")
+  );
+  if (!result.success) {
     throw new Error(failure);
   }
+  const [room, token, key] = result.output;
   return { key, room, token };
 }
-const finite = (value: unknown): value is number =>
-  typeof value === "number" && Number.isFinite(value);
 export async function decrypt(
   key: CryptoKey,
   room: string,
   packet: Packet
 ): Promise<ViewState> {
-  if (
-    !Number.isSafeInteger(packet.seq) ||
-    packet.seq < 1 ||
-    typeof packet.box !== "string" ||
-    packet.box.length > 4_000_000
-  ) {
-    throw new Error(failure);
-  }
+  v.parse(StatePacketSchema, packet);
   const bytes = unbase64(packet.box);
   const data = await crypto.subtle.decrypt(
     {
@@ -92,56 +52,7 @@ export async function decrypt(
     key,
     bytes.slice(12)
   );
-  // Every snapshot field is validated below before it reaches viewer state.
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion
-  const state = JSON.parse(new TextDecoder().decode(data)) as ViewState;
-  if (
-    state.version !== 1 ||
-    typeof state.live !== "boolean" ||
-    !Array.isArray(state.answers) ||
-    !Number.isSafeInteger(state.selection) ||
-    state.selection < 0 ||
-    !finite(state.fontSize) ||
-    state.fontSize < 16 ||
-    state.fontSize > 40 ||
-    (["language", "modifiers", "error"] as const).some(
-      (k) => typeof state[k] !== "string"
-    )
-  ) {
-    throw new Error(failure);
-  }
-  if (
-    state.selectedID !== undefined &&
-    state.selectedID !== null &&
-    typeof state.selectedID !== "string"
-  ) {
-    throw new Error(failure);
-  }
-  if (
-    state.answers.some(
-      (card: AnswerCard) =>
-        typeof card.id !== "string" ||
-        typeof card.text !== "string" ||
-        !["generating", "complete", "incomplete", "failed"].includes(
-          card.status
-        )
-    )
-  ) {
-    throw new Error(failure);
-  }
-  if (
-    state.command !== undefined &&
-    state.command !== null &&
-    (!Number.isSafeInteger(state.command.id) ||
-      state.command.id < 1 ||
-      ![-1, 1].includes(state.command.direction) ||
-      (state.command.answerID !== undefined &&
-        state.command.answerID !== null &&
-        typeof state.command.answerID !== "string"))
-  ) {
-    throw new Error(failure);
-  }
-  return state;
+  return v.parse(ViewStateSchema, JSON.parse(new TextDecoder().decode(data)));
 }
 export async function acknowledgment(
   key: CryptoKey,
@@ -167,5 +78,5 @@ export async function acknowledgment(
   const box = new Uint8Array(iv.length + cipher.length);
   box.set(iv);
   box.set(cipher, iv.length);
-  return JSON.stringify({ box: base64(box), seq, type: "ack" });
+  return JSON.stringify({ box: base64.encode(box), seq, type: "ack" });
 }

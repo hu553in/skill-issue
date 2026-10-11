@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import JOSESwift
 
 @main enum NativeRelayCheck {
     struct Ready: Decodable {
@@ -34,7 +35,7 @@ import Foundation
         let parts = fragment.split(separator: ".").map(String.init)
         guard parts.count == 3,
             var endpoint = URLComponents(url: relay.viewerURL, resolvingAgainstBaseURL: false),
-            let keyData = Data(base64url: parts[2])
+            let keyData = Data(base64URLEncoded: parts[2])
         else { throw AppFailure.failed }
         endpoint.fragment = nil
         endpoint.path = "/rooms/\(parts[0])/socket"
@@ -73,7 +74,7 @@ import Foundation
         else { throw AppFailure.failed }
         let box = try AES.GCM.SealedBox(combined: combined)
         let plain = try AES.GCM.open(
-            box, using: SymmetricKey(data: keyData),
+            box, using: CryptoKit.SymmetricKey(data: keyData),
             authenticating: Data("\(parts[0]):\(packet.seq)".utf8))
         guard try JSONDecoder().decode(ViewState.self, from: plain) == state else {
             throw AppFailure.failed

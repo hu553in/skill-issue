@@ -82,14 +82,32 @@ private final class TestHTTP: @unchecked Sendable {
     private var catalog: [[String: Any]]
     private var catalogStatus = 200
     private var responseBodies: [[String: Any]] = []
+    private var responseRequests: [URLRequest] = []
+    private var responseCancellations = 0
     private let output: Output
-    init(output: Output = .empty, models: [[String: Any]] = [catalogModel("gpt-6-luna")]) {
+    private let stream: [Data]?
+    private let finishStream: Bool
+    private let responseStatus: Int
+    init(
+        output: Output = .empty, models: [[String: Any]] = [catalogModel("gpt-6-luna")],
+        stream: [Data]? = nil, finishStream: Bool = true, responseStatus: Int = 200
+    ) {
         self.output = output
         catalog = models
+        self.stream = stream
+        self.finishStream = finishStream
+        self.responseStatus = responseStatus
     }
     var refreshPending: Bool { lock.withLock { refresh != nil } }
     var modelsRequested: Int { lock.withLock { modelRequests } }
     var requests: [[String: Any]] { lock.withLock { responseBodies } }
+    var wireRequests: [URLRequest] { lock.withLock { responseRequests } }
+    var cancelledResponses: Int { lock.withLock { responseCancellations } }
+    func cancelled(_ request: URLRequest) {
+        if request.url?.path == "/v1/responses" {
+            lock.withLock { responseCancellations += 1 }
+        }
+    }
     func setCatalog(_ models: [[String: Any]], status: Int = 200) {
         lock.withLock {
             catalog = models
@@ -123,6 +141,7 @@ private final class TestHTTP: @unchecked Sendable {
             ])
         case "/revoke": request.respond([:])
         case "/v1/responses":
+            lock.withLock { responseRequests.append(request.request) }
             var body = request.request.httpBody ?? Data()
             if let stream = request.request.httpBodyStream {
                 stream.open()
@@ -136,6 +155,12 @@ private final class TestHTTP: @unchecked Sendable {
             }
             if let payload = try? JSONSerialization.jsonObject(with: body) as? [String: Any] {
                 lock.withLock { responseBodies.append(payload) }
+            }
+            if let stream {
+                request.respond(
+                    stream, contentType: "text/event-stream", status: responseStatus,
+                    finished: finishStream)
+                return
             }
             let refusal = "I cannot assist with that request."
             var events: [[String: Any]] = []
@@ -168,6 +193,8 @@ private final class TestHTTP: @unchecked Sendable {
 private final class MockHTTPProtocol: URLProtocol, @unchecked Sendable {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var server: TestHTTP?
+    private let stateLock = NSLock()
+    private var receiver: TestHTTP?
     static func session(server: TestHTTP) -> URLSession {
         lock.withLock { Self.server = server }
         let configuration = URLSessionConfiguration.ephemeral
@@ -176,8 +203,12 @@ private final class MockHTTPProtocol: URLProtocol, @unchecked Sendable {
     }
     override static func canInit(with request: URLRequest) -> Bool { true }
     override static func canonicalRequest(for request: URLRequest) -> URLRequest { request }
-    override func startLoading() { Self.lock.withLock { Self.server }?.receive(self) }
-    override func stopLoading() {}
+    override func startLoading() {
+        let server = Self.lock.withLock { Self.server }
+        stateLock.withLock { receiver = server }
+        server?.receive(self)
+    }
+    override func stopLoading() { stateLock.withLock { receiver }?.cancelled(request) }
     func respond(_ value: [String: Any], status: Int = 200) {
         // Fixture dictionaries contain only JSON-compatible values.
         // swiftlint:disable:next force_try
@@ -185,17 +216,28 @@ private final class MockHTTPProtocol: URLProtocol, @unchecked Sendable {
         respond(data, contentType: "application/json", status: status)
     }
     func respond(_ data: Data, contentType: String, status: Int = 200) {
+        respond([data], contentType: contentType, status: status)
+    }
+    func respond(_ chunks: [Data], contentType: String, status: Int = 200, finished: Bool = true) {
         let response = HTTPURLResponse(
             url: request.url!, statusCode: status, httpVersion: "HTTP/1.1",
             headerFields: ["Content-Type": contentType])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: data)
-        client?.urlProtocolDidFinishLoading(self)
+        for chunk in chunks { client?.urlProtocol(self, didLoad: chunk) }
+        if finished { client?.urlProtocolDidFinishLoading(self) }
     }
 }
 
 @Suite(.serialized) @MainActor
 struct ChatGPTTests {
+    private func configuredChatGPT(session: URLSession) async throws -> ChatGPT {
+        let chatGPT = ChatGPT(
+            session: session, storage: StoredCredentials().storage, defaults: TestDefaults())
+        try await chatGPT.restore()
+        let models = try await chatGPT.listModels()
+        try await chatGPT.prepareSession(model: models[0], effort: "low")
+        return chatGPT
+    }
     private func waitUntil(_ condition: () -> Bool) async throws {
         let deadline = ContinuousClock.now + .seconds(3)
         while !condition(), ContinuousClock.now < deadline {
@@ -506,5 +548,140 @@ struct ChatGPTTests {
                 #expect(failed)
             }
         }
+    }
+
+    @Test func eventStreamFramingPreservesUnicodeAndMultilineData() async throws {
+        for delimiter in ["\n", "\r\n"] {
+            let stream = """
+                : heartbeat
+
+                event: response.output_text.delta
+                id: ignored
+                data: {"type":"response.output_text.delta",
+                data: "delta":"Привет 🐢"}
+
+                data: {"type":"response.completed"}
+
+                data: [DONE]
+
+
+                """.replacingOccurrences(of: "\n", with: delimiter)
+            let bytes = Array(stream.utf8)
+            let split = try #require(bytes.firstIndex(of: 0xf0)) + 1
+            let server = TestHTTP(stream: [Data(bytes[..<split]), Data(bytes[split...])])
+            let session = MockHTTPProtocol.session(server: server)
+            defer { session.invalidateAndCancel() }
+            let chatGPT = try await configuredChatGPT(session: session)
+            var text = ""
+            try await chatGPT.answer(input: [], language: "Russian") { text += $0 }
+            #expect(text == "Привет 🐢")
+            let request = try #require(server.wireRequests.first)
+            #expect(server.wireRequests.count == 1 && request.httpMethod == "POST")
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer old-access")
+            #expect(request.timeoutInterval == 180)
+        }
+    }
+
+    @Test func unfinishedAndFailedEventStreamsRejectCompletionWithoutReplay() async throws {
+        let delta = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Partial\"}\n\n"
+        let completion = "data: {\"type\":\"response.completed\"}"
+        let streams =
+            [delta, delta + completion, delta + completion + "\n"]
+            + ["response.failed", "response.incomplete", "error"].map {
+                delta + "data: {\"type\":\"\($0)\"}\n\n" + completion + "\n\n"
+            }
+        for stream in streams {
+            let server = TestHTTP(stream: [Data(stream.utf8)])
+            let session = MockHTTPProtocol.session(server: server)
+            defer { session.invalidateAndCancel() }
+            let chatGPT = try await configuredChatGPT(session: session)
+            var text = ""
+            var failed = false
+            do { try await chatGPT.answer(input: [], language: "English") { text += $0 } } catch {
+                failed = true
+            }
+            #expect(failed && text == "Partial")
+            #expect(server.wireRequests.count == 1)
+        }
+    }
+
+    @Test func eventStreamLineLimitIsEnforcedBeforeDispatch() async throws {
+        for delimiter in ["\n", "\r\n"] {
+            for size in [256_000, 256_001] {
+                let prefix = "data: {\"type\":\"response.output_text.delta\",\"delta\":\""
+                let suffix = "\"}"
+                // The bound counts CR before LF, matching the existing network contract.
+                let text = String(
+                    repeating: "x",
+                    count: size - prefix.utf8.count - suffix.utf8.count
+                        - (delimiter == "\r\n" ? 1 : 0))
+                let stream =
+                    prefix + text + suffix + delimiter + delimiter
+                    + "data: {\"type\":\"response.completed\"}" + delimiter + delimiter
+                let server = TestHTTP(stream: [Data(stream.utf8)])
+                let session = MockHTTPProtocol.session(server: server)
+                defer { session.invalidateAndCancel() }
+                let chatGPT = try await configuredChatGPT(session: session)
+                var received = ""
+                var failed = false
+                do {
+                    try await chatGPT.answer(input: [], language: "English") { received += $0 }
+                } catch {
+                    failed = true
+                }
+                #expect(failed == (size > 256_000))
+                #expect(received == (size > 256_000 ? "" : text))
+                #expect(server.wireRequests.count == 1)
+            }
+        }
+    }
+
+    @Test func cancelledEventStreamStopsRequestWithoutReplay() async throws {
+        let server = TestHTTP(
+            stream: [
+                Data(
+                    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Partial\"}\n\n".utf8
+                )
+            ],
+            finishStream: false)
+        let session = MockHTTPProtocol.session(server: server)
+        defer { session.invalidateAndCancel() }
+        let chatGPT = try await configuredChatGPT(session: session)
+        var text = ""
+        var finished = false
+        var failed = false
+        let answer = Task {
+            defer { finished = true }
+            do { try await chatGPT.answer(input: [], language: "English") { text += $0 } } catch {
+                failed = true
+            }
+        }
+        defer { answer.cancel() }
+        try await waitUntil { text == "Partial" }
+        answer.cancel()
+        try await waitUntil { finished && server.cancelledResponses > 0 }
+        await answer.value
+        #expect(failed && text == "Partial")
+        #expect(server.wireRequests.count == 1)
+    }
+
+    @Test func nonSuccessfulResponsesStatusDoesNotEmitTextOrReplay() async throws {
+        let server = TestHTTP(
+            stream: [
+                Data(
+                    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Forbidden\"}\n\n"
+                        .utf8)
+            ],
+            responseStatus: 429)
+        let session = MockHTTPProtocol.session(server: server)
+        defer { session.invalidateAndCancel() }
+        let chatGPT = try await configuredChatGPT(session: session)
+        var text = ""
+        var failed = false
+        do { try await chatGPT.answer(input: [], language: "English") { text += $0 } } catch {
+            failed = true
+        }
+        #expect(failed && text.isEmpty)
+        #expect(server.wireRequests.count == 1)
     }
 }

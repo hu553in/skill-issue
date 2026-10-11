@@ -6,6 +6,7 @@ let package = Package(
     platforms: [.macOS("26.0")],
     dependencies: [
         .package(url: "https://github.com/airsidemobile/JOSESwift.git", exact: "3.0.0"),
+        .package(url: "https://github.com/apple/swift-openapi-runtime", exact: "1.13.0"),
         .package(
             url: "https://github.com/soniqo/speech-swift.git",
             revision: "cbcdfc6be5e723952d29ab6e32af5e22ad8e70fa"),
@@ -14,7 +15,8 @@ let package = Package(
         .executableTarget(
             name: "SkillIssue",
             dependencies: [
-                "JOSESwift", .product(name: "NemotronStreamingASR", package: "speech-swift"),
+                "JOSESwift", .product(name: "OpenAPIRuntime", package: "swift-openapi-runtime"),
+                .product(name: "NemotronStreamingASR", package: "speech-swift"),
                 .product(name: "AudioCommon", package: "speech-swift"),
             ], path: "native", resources: [.copy("Resources")],
             swiftSettings: [.treatAllWarnings(as: .error)]),

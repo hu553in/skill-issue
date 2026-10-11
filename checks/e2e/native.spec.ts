@@ -1,7 +1,9 @@
 import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { promisify } from "node:util";
 
+import type { Packet } from "../../protocol";
 import {
   acknowledgment,
   decrypt,
@@ -9,7 +11,6 @@ import {
   parseLink,
   unbase64,
 } from "../../web/session";
-import type { Packet } from "../../web/session";
 import { expect, test } from "./fixtures";
 import { Peer } from "./peer";
 
@@ -33,12 +34,29 @@ test("CryptoKit snapshots and WebCrypto acknowledgments interoperate through the
     throw new Error("The integration server URL is missing");
   }
   const binary = testInfo.outputPath("native-relay-check");
-  const path = testInfo.outputPath("native-fixture.json");
+  const fixturePath = testInfo.outputPath("native-fixture.json");
+  await execute("swift", [
+    "build",
+    "--target",
+    "JOSESwift",
+    "--jobs",
+    "4",
+    "--force-resolved-versions",
+  ]);
+  const { stdout } = await execute("swift", [
+    "build",
+    "--show-bin-path",
+    "--force-resolved-versions",
+  ]);
+  const products = stdout.trim();
   await execute("xcrun", [
     "swiftc",
     "-swift-version",
     "6",
     "-warnings-as-errors",
+    "-I",
+    products,
+    path.join(products, "JOSESwift.o"),
     "native/Core.swift",
     "native/Relay.swift",
     "checks/native_relay.swift",
@@ -51,7 +69,7 @@ test("CryptoKit snapshots and WebCrypto acknowledgments interoperate through the
     try {
       return {
         ok: true as const,
-        output: await execute(binary, [baseURL, path], {
+        output: await execute(binary, [baseURL, fixturePath], {
           signal: controller.signal,
         }),
       };
@@ -63,7 +81,9 @@ test("CryptoKit snapshots and WebCrypto acknowledgments interoperate through the
     await expect
       .poll(async () => {
         try {
-          return JSON.parse(await readFile(path, "utf-8")) as NativeFixture;
+          return JSON.parse(
+            await readFile(fixturePath, "utf-8")
+          ) as NativeFixture;
         } catch (error) {
           if (
             error instanceof Error &&
@@ -76,7 +96,9 @@ test("CryptoKit snapshots and WebCrypto acknowledgments interoperate through the
         }
       })
       .not.toBeNull();
-    const fixture = JSON.parse(await readFile(path, "utf-8")) as NativeFixture;
+    const fixture = JSON.parse(
+      await readFile(fixturePath, "utf-8")
+    ) as NativeFixture;
     const link = parseLink(new URL(fixture.viewerURL).hash);
     expect(link.room).toBe(fixture.room);
     const key = await crypto.subtle.importKey(

@@ -1,5 +1,5 @@
+import type { ViewState } from "../../protocol";
 import { acknowledgment, decrypt, empty, unbase64 } from "../../web/session";
-import type { ViewState } from "../../web/session";
 import { expect, test } from "./fixtures";
 import { Peer } from "./peer";
 
@@ -154,4 +154,90 @@ test("a replacement writer closes its predecessor and publishes to existing read
   expect(
     await decrypt(relay.key, relay.room.id, await reader.peer.next("state"))
   ).toEqual(state);
+});
+
+test("HTTP routes and asset security headers match the deployed Worker contract", async ({
+  request,
+}) => {
+  const viewer = await request.get("/");
+  expect(viewer.status()).toBe(200);
+  expect(viewer.headers()["referrer-policy"]).toBe("no-referrer");
+  expect(viewer.headers()["x-content-type-options"]).toBe("nosniff");
+  expect(
+    viewer.headers()["content-security-policy"]?.split("; ").toSorted()
+  ).toEqual(
+    [
+      "base-uri 'none'",
+      "connect-src 'self' ws: wss:",
+      "default-src 'self'",
+      "frame-ancestors 'none'",
+      "img-src 'self' data:",
+      "script-src 'self'",
+      "style-src 'self'",
+    ].toSorted()
+  );
+  for (const path of [
+    "/rooms/",
+    "/rooms-extra",
+    "/rooms/id/socket",
+    "/rooms/00000000-0000-0000-0000-000000000001/socket/",
+    "/rooms/%300000000-0000-0000-0000-000000000001/socket",
+  ]) {
+    // Verify each HTTP response before issuing the next malformed request.
+    // oxlint-disable-next-line no-await-in-loop
+    const invalid = await request.get(path);
+    expect(invalid.status()).toBe(400);
+    // oxlint-disable-next-line no-await-in-loop
+    expect(await invalid.text()).toBe("Couldn't complete that. Try again.");
+    expect(invalid.headers()["content-security-policy"]).toBeUndefined();
+  }
+});
+
+test("invalid packets close only their peer while extended snapshots and acknowledgments retain compatibility", async ({
+  relay,
+}) => {
+  const valid = await relay.publish({ ...empty, live: true });
+  const reader = await relay.connect("reader");
+  expect(await reader.peer.next("state")).toEqual(valid);
+  const offender = new Peer(
+    `${relay.base.replace(/^http/u, "ws")}/rooms/${relay.room.id}/socket?_pk=attacker-chosen`,
+    "reader",
+    relay.room.reader
+  );
+  relay.peers.push(offender);
+  const ready = await offender.next("ready");
+  expect(ready.client).toMatch(/^[0-9a-f-]{36}$/u);
+  expect(ready.client).not.toBe("attacker-chosen");
+  offender.send({ box: "YQ==", seq: valid.seq + 1, type: "ack" });
+  const ackClose = await offender.closed;
+  expect(ackClose.code).toBe(1008);
+  const extended = {
+    ...valid,
+    extension: { ignored: true },
+    seq: valid.seq + 1,
+  };
+  relay.writer.send(extended);
+  expect(await reader.peer.next("state")).toEqual(extended);
+  reader.peer.send({
+    box: "YQ==",
+    ignored: true,
+    seq: extended.seq,
+    type: "ack",
+  });
+  expect(await relay.writer.next("ack")).toEqual({
+    box: "YQ==",
+    client: reader.client,
+    seq: extended.seq,
+    type: "ack",
+  });
+  const replacement = await relay.connect("writer");
+  replacement.peer.send({ ...extended, seq: extended.seq });
+  const staleClose = await replacement.peer.closed;
+  expect(staleClose.code).toBe(1008);
+  const restored = await relay.connect("writer");
+  restored.peer.send({ ...extended, box: "?", seq: extended.seq + 1 });
+  const malformedClose = await restored.peer.closed;
+  expect(malformedClose.code).toBe(1008);
+  const replay = await relay.connect("reader");
+  expect(await replay.peer.next("state")).toEqual(extended);
 });

@@ -5,6 +5,26 @@
       "request": "attach",
       "name": "Attach to Skill Issue",
       "pid": "${command:pickProcess}"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:skill-issue}",
+      "name": "Debug SkillIssue",
+      "target": "SkillIssue",
+      "configuration": "debug",
+      "preLaunchTask": "swift: Build Debug SkillIssue"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:skill-issue}",
+      "name": "Release SkillIssue",
+      "target": "SkillIssue",
+      "configuration": "release",
+      "preLaunchTask": "swift: Build Release SkillIssue"
     }
   ]
 }

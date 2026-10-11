@@ -2,7 +2,31 @@ import AppKit
 import CryptoKit
 import JOSESwift
 @preconcurrency import Network
+import OpenAPIRuntime
 import Security
+
+// The SSE decoder takes byte chunks and has no line-size limit. Bound URLSession's
+// input before it reaches the decoder, flushing on LF so tokens never wait for a full buffer.
+private struct ResponseByteChunks: AsyncSequence, Sendable {
+    let bytes: URLSession.AsyncBytes
+    func makeAsyncIterator() -> Iterator { Iterator(bytes: bytes.makeAsyncIterator()) }
+    struct Iterator: AsyncIteratorProtocol {
+        var bytes: URLSession.AsyncBytes.Iterator
+        mutating func next() async throws -> ArraySlice<UInt8>? {
+            var chunk: [UInt8] = []
+            while let byte = try await bytes.next() {
+                try Task.checkCancellation()
+                if byte == 10 {
+                    chunk.append(byte)
+                    return chunk[...]
+                }
+                chunk.append(byte)
+                guard chunk.count <= 256_000 else { throw AppFailure.failed }
+            }
+            return chunk.isEmpty ? nil : chunk[...]
+        }
+    }
+}
 
 struct Credentials: Codable, Sendable {
     var clientID: String
@@ -109,9 +133,9 @@ final class ChatGPT {
         let server = try CallbackServer()
         defer { server.stop() }
         let redirect = try await server.start()
-        let state = Data.random().base64url
-        let nonce = Data.random().base64url
-        let verifier = Data.random().base64url
+        let state = Data.random().base64URLEncodedString()
+        let nonce = Data.random().base64URLEncodedString()
+        let verifier = Data.random().base64URLEncodedString()
         let host = defaults.string(forKey: "hostID") ?? "urn:uuid:\(UUID().uuidString.lowercased())"
         defaults.set(host, forKey: "hostID")
         let existingClient = credentials?.clientID ?? defaults.string(forKey: "issuedClientID")
@@ -121,7 +145,7 @@ final class ChatGPT {
             "scope":
                 "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct",
             "resource": resource, "state": state, "nonce": nonce, "code_challenge_method": "S256",
-            "code_challenge": Data(SHA256.hash(data: Data(verifier.utf8))).base64url,
+            "code_challenge": Data(SHA256.hash(data: Data(verifier.utf8))).base64URLEncodedString(),
         ]
         if existingClient == nil { parameters["agent_name_hint"] = "Skill Issue" }
         if let credentials { parameters["id_token_hint"] = credentials.idToken }
@@ -156,7 +180,7 @@ final class ChatGPT {
     {
         let jws = try JWS(compactSerialization: token)
         let parts = token.split(separator: ".")
-        guard parts.count == 3, let headerData = Data(base64url: String(parts[0])),
+        guard parts.count == 3, let headerData = Data(base64URLEncoded: String(parts[0])),
             let header = try JSONSerialization.jsonObject(with: headerData) as? [String: Any],
             header["alg"] as? String == "RS256", let kid = header["kid"] as? String
         else { throw AppFailure.failed }
@@ -327,23 +351,13 @@ final class ChatGPT {
                         .utf8))
         #endif
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw AppFailure.failed }
-        var parser = SSEParser()
         var completed = false
         var hasText = false
-        var line = Data()
-        // AsyncBytes.lines can discard empty lines; SSE needs those event boundaries.
-        for try await byte in bytes {
+        for try await event in ResponseByteChunks(bytes: bytes).asDecodedServerSentEvents() {
             try Task.checkCancellation()
-            if byte != 10 {
-                line.append(byte)
-                guard line.count <= 256_000 else { throw AppFailure.failed }
-                continue
-            }
-            if line.last == 13 { line.removeLast() }
-            let event = parser.push(String(decoding: line, as: UTF8.self))
-            line.removeAll(keepingCapacity: true)
-            guard let event, let data = event.data(using: .utf8),
-                let body = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            guard let data = event.data,
+                let body = try JSONSerialization.jsonObject(with: Data(data.utf8))
+                    as? [String: Any],
                 let type = body["type"] as? String
             else { continue }
             if ["response.output_text.delta", "response.refusal.delta"].contains(type),

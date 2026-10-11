@@ -1,4 +1,4 @@
-import type { Packet } from "../../web/session";
+import type { Packet } from "../../protocol";
 
 type Message =
   | Packet

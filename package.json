@@ -29,7 +29,7 @@
     "check:unused:swift": "bash scripts/quality-swift.sh analyze",
     "check:vulns": "bun audit --prod --audit-level=high",
     "check:plist": "plutil -lint scripts/Info.plist && plutil -convert xml1 -o - scripts/Info.plist | diff scripts/Info.plist -",
-    "check:integration:web": "bun playwright:install && playwright test --project=web --project=relay",
+    "check:integration:web": "bun playwright:install && playwright test --project=web && playwright test --project=relay",
     "check:integration:swift": "playwright test --project=native",
     "test:web": "bun test checks/*.test.ts",
     "test:coverage:web": "bun test --coverage --coverage-reporter=text --coverage-reporter=lcov checks/*.test.ts",
@@ -46,9 +46,13 @@
     "prepare": "if [ -n \"${CI:-}\" ] || [ \"${LEFTHOOK:-}\" = \"0\" ]; then exit 0; fi; lefthook install"
   },
   "dependencies": {
+    "@scure/base": "^2.4.0",
+    "hono": "^4.13.13",
+    "partysocket": "^1.3.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
-    "react-markdown": "^10.1.0"
+    "react-markdown": "^10.1.0",
+    "valibot": "^1.5.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.64.0",
