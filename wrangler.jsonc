@@ -1,0 +1,38 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "skill-issue",
+  "main": "relay/worker.ts",
+  "compatibility_date": "2026-10-10",
+  "assets": {
+    "directory": "./web/dist",
+    "binding": "ASSETS",
+    "run_worker_first": ["/rooms/*", "/rooms"],
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "ROOMS",
+        "class_name": "Room",
+      },
+    ],
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["Room"],
+    },
+  ],
+  "ratelimits": [
+    {
+      "name": "ROOM_LIMIT",
+      "namespace_id": "706462",
+      "simple": {
+        "limit": 20,
+        "period": 60,
+      },
+    },
+  ],
+  "observability": {
+    "enabled": false,
+  },
+}

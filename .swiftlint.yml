@@ -1,0 +1,87 @@
+# swift-format owns layout. SwiftLint checks correctness and API usage.
+included:
+  - native
+  - tests
+  - checks/native_relay.swift
+  - scripts/quit.swift
+  - Package.swift
+strict: true
+check_for_updates: false
+only_rules:
+  - array_init
+  - async_without_await
+  - blanket_disable_command
+  - block_based_kvo
+  - class_delegate_protocol
+  - compiler_protocol_init
+  - contains_over_filter_count
+  - contains_over_filter_is_empty
+  - contains_over_first_not_nil
+  - contains_over_range_nil_comparison
+  - deployment_target
+  - discarded_notification_center_observer
+  - discouraged_direct_init
+  - duplicate_conditions
+  - duplicate_enum_cases
+  - duplicate_imports
+  - duplicated_key_in_dictionary_literal
+  - empty_collection_literal
+  - empty_count
+  - empty_string
+  - fallthrough
+  - fatal_error_message
+  - first_where
+  - flatmap_over_map_reduce
+  - force_cast
+  - force_try
+  - for_where
+  - identical_operands
+  - is_disjoint
+  - legacy_cggeometry_functions
+  - legacy_constant
+  - legacy_constructor
+  - legacy_hashing
+  - legacy_multiple
+  - legacy_nsgeometry_functions
+  - legacy_random
+  - notification_center_detachment
+  - nsobject_prefer_isequal
+  - orphaned_doc_comment
+  - overridden_super_call
+  - prefer_self_in_static_references
+  - private_outlet
+  - private_subject
+  - prohibited_super_call
+  - reduce_boolean
+  - reduce_into
+  - redundant_discardable_let
+  - redundant_nil_coalescing
+  - redundant_objc_attribute
+  - redundant_set_access_control
+  - redundant_void_return
+  - return_value_from_void_function
+  - self_in_property_initialization
+  - shorthand_optional_binding
+  - sorted_first_last
+  - static_over_final_class
+  - strong_iboutlet
+  - superfluous_disable_command
+  - syntactic_sugar
+  - unavailable_condition
+  - unhandled_throwing_task
+  - unneeded_break_in_switch
+  - unneeded_override
+  - unused_closure_parameter
+  - unused_control_flow_label
+  - unused_enumerated
+  - unused_optional_binding
+  - unused_setter_value
+  - valid_ibinspectable
+  - weak_delegate
+analyzer_rules:
+  - unused_declaration
+  - unused_import
+unused_import:
+  allowed_transitive_imports:
+    - module: OSLog
+      allowed_transitive_imports: [os]

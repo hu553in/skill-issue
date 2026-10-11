@@ -1,0 +1,11 @@
+{
+  "recommendations": [
+    "editorconfig.editorconfig",
+    "github.vscode-github-actions",
+    "mkhl.shfmt",
+    "oxc.oxc-vscode",
+    "stylelint.vscode-stylelint",
+    "swiftlang.swift-vscode",
+    "timonwong.shellcheck"
+  ]
+}

@@ -1,0 +1,15 @@
+output:
+  - execution
+  - failure
+
+commit-msg:
+  commands:
+    commitlint:
+      run: >-
+        bunx --silent --package @commitlint/cli@latest commitlint --default-config --strict --edit
+        {1}
+
+pre-commit:
+  jobs:
+    - run: bun check:fix
+      stage_fixed: true

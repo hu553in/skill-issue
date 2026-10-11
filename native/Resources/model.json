@@ -1,0 +1,70 @@
+{
+  "id": "aufklarer/Nemotron-3.5-ASR-Streaming-0.6B-CoreML-INT8",
+  "revision": "447095fe87b480b5e6a15367f135303d479de8ac",
+  "files": {
+    "config.json": {
+      "bytes": 589,
+      "sha256": "f211a2802eae75d05309c4978f129819fa94083fd0c3bc55d7dab06335953113"
+    },
+    "decoder.mlmodelc/analytics/coremldata.bin": {
+      "bytes": 243,
+      "sha256": "4d58297228f44ca23752d3850c60a0559af78a6d4455b348cd8dc6364b8ed0d4"
+    },
+    "decoder.mlmodelc/coremldata.bin": {
+      "bytes": 404,
+      "sha256": "15a3baf01a47f013b388b76b940ab5ec33ba84a8bc6025e5d5dba1ec9bf28762"
+    },
+    "decoder.mlmodelc/model.mil": {
+      "bytes": 8981,
+      "sha256": "d0cd6c15e2898f834c7fb268e0684f291ac20869639c49cfeab88504a1112e9e"
+    },
+    "decoder.mlmodelc/weights/weight.bin": {
+      "bytes": 29870592,
+      "sha256": "dcdeccd4ccf46e2675224f9f030d46c1a89e2bda4abb316e901e1a21f1597f8f"
+    },
+    "encoder.mlmodelc/analytics/coremldata.bin": {
+      "bytes": 243,
+      "sha256": "cdd661c54b5e6f6389b58567c144cba6fad0d9e2c998d8a9048f87e857f9f32b"
+    },
+    "encoder.mlmodelc/coremldata.bin": {
+      "bytes": 701,
+      "sha256": "c37a6fb1813130e71e0a19e58c235974234f1b9b3984ec1afa9323bf3c192e8d"
+    },
+    "encoder.mlmodelc/model.mil": {
+      "bytes": 821810,
+      "sha256": "28c91a4bf90a15fa0c65c62bdc67e8755ad43f5f5ff42503b13e05768035d8ce"
+    },
+    "encoder.mlmodelc/weights/weight.bin": {
+      "bytes": 591932416,
+      "sha256": "5fab9a684e34183d5f19cd1c63c19eefd7b02cc5a68af1367c6489702e746508"
+    },
+    "joint.mlmodelc/analytics/coremldata.bin": {
+      "bytes": 243,
+      "sha256": "e76f3618638fd5cf64805d4ba57942cbc7fcb1b38edd13851a151978871e57c4"
+    },
+    "joint.mlmodelc/coremldata.bin": {
+      "bytes": 355,
+      "sha256": "1b4924670d16462ab2de77fb7e5f7fa721af139939e5ab2ddcd903734894ce9d"
+    },
+    "joint.mlmodelc/model.mil": {
+      "bytes": 3921,
+      "sha256": "8a4c0bab78d227f82c2cdf72ecaf0b4b61ce1a26c1299ea1c879cd71af65ede2"
+    },
+    "joint.mlmodelc/weights/weight.bin": {
+      "bytes": 18911744,
+      "sha256": "c0ef0a3a6598f962d2aad598dc6850e4428874033419817121e11f1fff4a9cfe"
+    },
+    "languages.json": {
+      "bytes": 2020,
+      "sha256": "a1efe863e1057d4658bce8175c978020ac35a63a3c9a65ae899f324a32c8e4f6"
+    },
+    "tokenizer.model": {
+      "bytes": 406554,
+      "sha256": "ce3895e40806f02a26c3a225161b96ef682d6c0054bae32a245dec4258d7d291"
+    },
+    "vocab.json": {
+      "bytes": 236127,
+      "sha256": "fd726dc25cc0c0b46403675127e831bab56ca56b8c7ae3ee7781f5c6d7692f4f"
+    }
+  }
+}

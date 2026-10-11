@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+jobs:
+  web:
+    name: Web
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: false
+      - uses: hu553in/common-things/.github/actions/setup-shfmt@main
+      - run: bun ci
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright|${{ runner.os }}|${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            playwright|${{ runner.os }}|
+      - run: bun playwright install-deps chromium
+      - run: bun check:web
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-web
+          path: coverage/lcov.info
+          if-no-files-found: ignore
+      - if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-test-results-web-${{ github.run_attempt }}
+          path: test-results
+          if-no-files-found: ignore
+
+  swift:
+    name: ${{ matrix.name }}
+    runs-on: xcode-27
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Swift
+            command: check:swift
+          - name: Thread Sanitizer
+            command: test:sanitize
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - run: bun ci
+      - run: |
+          xcodebuild -version
+          swift --version
+      - uses: actions/cache@v6
+        with:
+          path: ~/Library/Caches/org.swift.swiftpm
+          key: swiftpm|${{ runner.os }}|${{ runner.arch }}|${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            swiftpm|${{ runner.os }}|${{ runner.arch }}|
+      - run: xcodebuild -downloadComponent metalToolchain
+      - if: matrix.command == 'check:swift'
+        run: brew install swiftlint
+      - run: bun run "${CHECK_COMMAND}"
+        env:
+          CHECK_COMMAND: ${{ matrix.command }}
+      - if: always() && matrix.command == 'check:swift'
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-swift
+          path: coverage/swift/lcov.info
+          if-no-files-found: ignore
+      - if: failure() && matrix.command == 'check:swift'
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-test-results-native-${{ github.run_attempt }}
+          path: test-results
+          if-no-files-found: ignore

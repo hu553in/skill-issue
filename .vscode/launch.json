@@ -1,0 +1,10 @@
+{
+  "configurations": [
+    {
+      "type": "swift",
+      "request": "attach",
+      "name": "Attach to Skill Issue",
+      "pid": "${command:pickProcess}"
+    }
+  ]
+}

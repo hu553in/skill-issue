@@ -1,0 +1,17 @@
+.build/
+.swiftpm/
+dist/
+node_modules/
+.wrangler/
+.DS_Store
+Thumbs.db
+.idea/
+*.iml
+.env*
+!.env.example
+!.env.example.*
+coverage/
+playwright-report/
+test-results/
+worker-configuration.d.ts
+.swiftlint-cache/
