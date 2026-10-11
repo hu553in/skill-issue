@@ -4,9 +4,9 @@ TASK_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$TASK_ROOT"
 MODE="${1:-run}"
 case "$#:$MODE" in
-0:run | 1:run | 1:verify | 1:--verify | 1:debug | 1:--debug | 1:logs | 1:--logs | 1:telemetry | 1:--telemetry) ;;
+0:run | 1:run | 1:--verify | 1:--debug | 1:--logs | 1:--telemetry) ;;
 *)
-	echo "Usage: $0 [run|verify|debug|logs|telemetry] (optional -- prefix except run)" >&2
+	echo "Usage: $0 [run|--verify|--debug|--logs|--telemetry]" >&2
 	exit 2
 	;;
 esac
@@ -18,18 +18,18 @@ bash "$TASK_ROOT/scripts/package.sh" debug
 APP_BUNDLE="$TASK_ROOT/dist/debug/Skill Issue.app"
 case "$MODE" in
 run) /usr/bin/open -n "$APP_BUNDLE" ;;
---verify | verify)
+--verify)
 	/usr/bin/open -n "$APP_BUNDLE"
 	sleep 2
 	pgrep -x SkillIssue >/dev/null
 	;;
---debug | debug) lldb -- "$APP_BUNDLE/Contents/MacOS/SkillIssue" ;;
---logs | logs)
+--debug) lldb -- "$APP_BUNDLE/Contents/MacOS/SkillIssue" ;;
+--logs)
 	: >"$TASK_ROOT/dist/app.log"
 	/usr/bin/open -n --stdout "$TASK_ROOT/dist/app.log" --stderr "$TASK_ROOT/dist/app.log" "$APP_BUNDLE"
 	tail -f "$TASK_ROOT/dist/app.log"
 	;;
---telemetry | telemetry)
+--telemetry)
 	/usr/bin/open -n "$APP_BUNDLE"
 	/usr/bin/log stream --info --style compact --predicate 'subsystem == "com.github.hu553in.skill-issue"'
 	;;

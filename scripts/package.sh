@@ -32,7 +32,16 @@ test -s "$RESOURCE_PATH/prompt.md"
 bun scripts/notices.ts swift "$STAGED_APP/Contents/Resources/Notices"
 codesign --force --sign - "$STAGED_APP"
 codesign --verify --strict "$STAGED_APP"
+if [[ "$CONFIGURATION" == release ]]; then
+	ARCHIVE_NAME="Skill-Issue-macos-arm64.zip"
+	lipo -verify_arch arm64 "$STAGED_APP/Contents/MacOS/SkillIssue"
+	ditto -c -k --sequesterRsrc --keepParent "$STAGED_APP" "$STAGING/$ARCHIVE_NAME"
+fi
 mkdir -p "$(dirname "$APP_BUNDLE")"
 rm -rf "$APP_BUNDLE"
 mv "$STAGED_APP" "$APP_BUNDLE"
 printf '%s\n' "$APP_BUNDLE"
+if [[ "$CONFIGURATION" == release ]]; then
+	mv "$STAGING/$ARCHIVE_NAME" "$TASK_ROOT/dist/$ARCHIVE_NAME"
+	printf '%s\n' "$TASK_ROOT/dist/$ARCHIVE_NAME"
+fi

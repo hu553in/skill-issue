@@ -89,6 +89,12 @@ jobs:
       - run: bun run "${CHECK_COMMAND}"
         env:
           CHECK_COMMAND: ${{ matrix.command }}
+      - if: matrix.command == 'check:swift'
+        uses: actions/upload-artifact@v7
+        with:
+          path: dist/Skill-Issue-macos-arm64.zip
+          if-no-files-found: error
+          archive: false
       - if: always() && matrix.command == 'check:swift'
         uses: actions/upload-artifact@v7
         with:
