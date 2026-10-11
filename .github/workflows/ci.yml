@@ -86,7 +86,7 @@ jobs:
       - run: xcodebuild -downloadComponent metalToolchain
       - if: matrix.command == 'check:swift'
         run: brew install swiftlint
-      - run: bun run "${CHECK_COMMAND}"
+      - run: bun "${CHECK_COMMAND}"
         env:
           CHECK_COMMAND: ${{ matrix.command }}
       - if: matrix.command == 'check:swift'

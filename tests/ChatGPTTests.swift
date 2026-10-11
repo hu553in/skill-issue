@@ -18,6 +18,9 @@ private final class TestDefaults: UserDefaults, @unchecked Sendable {
     override func string(forKey defaultName: String) -> String? {
         lock.withLock { values[defaultName] as? String }
     }
+    override func integer(forKey defaultName: String) -> Int {
+        lock.withLock { values[defaultName] as? Int ?? 0 }
+    }
     override func set(_ value: Any?, forKey defaultName: String) {
         lock.withLock { values[defaultName] = value }
     }
@@ -58,15 +61,41 @@ private final class StoredCredentials: @unchecked Sendable {
     }
 }
 
+private func catalogModel(
+    _ slug: String, name: String? = nil, visibility: String = "list",
+    efforts: [String]? = ["low", "medium", "high"]
+) -> [String: Any] {
+    var fields: [String: Any] = [
+        "slug": slug, "display_name": name ?? slug, "visibility": visibility,
+    ]
+    if let efforts {
+        fields["supported_reasoning_levels"] = efforts.map { ["effort": $0] }
+    }
+    return fields
+}
+
 private final class TestHTTP: @unchecked Sendable {
     enum Output: Sendable { case text, refusal, empty, whitespace }
     private let lock = NSLock()
     private var refresh: MockHTTPProtocol?
     private var modelRequests = 0
+    private var catalog: [[String: Any]]
+    private var catalogStatus = 200
+    private var responseBodies: [[String: Any]] = []
     private let output: Output
-    init(output: Output = .empty) { self.output = output }
+    init(output: Output = .empty, models: [[String: Any]] = [catalogModel("gpt-6-luna")]) {
+        self.output = output
+        catalog = models
+    }
     var refreshPending: Bool { lock.withLock { refresh != nil } }
     var modelsRequested: Int { lock.withLock { modelRequests } }
+    var requests: [[String: Any]] { lock.withLock { responseBodies } }
+    func setCatalog(_ models: [[String: Any]], status: Int = 200) {
+        lock.withLock {
+            catalog = models
+            catalogStatus = status
+        }
+    }
     func finishRefresh() {
         let pending = lock.withLock {
             let pending = refresh
@@ -81,8 +110,11 @@ private final class TestHTTP: @unchecked Sendable {
     func receive(_ request: MockHTTPProtocol) {
         switch request.request.url!.path {
         case "/v1/models":
-            lock.withLock { modelRequests += 1 }
-            request.respond(["models": [["slug": "gpt-6.1-sol", "visibility": "list"]]])
+            let (models, status) = lock.withLock {
+                modelRequests += 1
+                return (catalog, catalogStatus)
+            }
+            request.respond(["models": models], status: status)
         case "/api/accounts/oauth/token": lock.withLock { refresh = request }
         case "/.well-known/openid-configuration":
             request.respond([
@@ -91,6 +123,20 @@ private final class TestHTTP: @unchecked Sendable {
             ])
         case "/revoke": request.respond([:])
         case "/v1/responses":
+            var body = request.request.httpBody ?? Data()
+            if let stream = request.request.httpBodyStream {
+                stream.open()
+                defer { stream.close() }
+                var buffer = [UInt8](repeating: 0, count: 4096)
+                while stream.hasBytesAvailable {
+                    let count = stream.read(&buffer, maxLength: buffer.count)
+                    if count <= 0 { break }
+                    body.append(contentsOf: buffer.prefix(count))
+                }
+            }
+            if let payload = try? JSONSerialization.jsonObject(with: body) as? [String: Any] {
+                lock.withLock { responseBodies.append(payload) }
+            }
             let refusal = "I cannot assist with that request."
             var events: [[String: Any]] = []
             if output == .refusal {
@@ -132,14 +178,15 @@ private final class MockHTTPProtocol: URLProtocol, @unchecked Sendable {
     override static func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() { Self.lock.withLock { Self.server }?.receive(self) }
     override func stopLoading() {}
-    func respond(_ value: [String: Any]) {
+    func respond(_ value: [String: Any], status: Int = 200) {
         // Fixture dictionaries contain only JSON-compatible values.
         // swiftlint:disable:next force_try
-        respond(try! JSONSerialization.data(withJSONObject: value), contentType: "application/json")
+        let data = try! JSONSerialization.data(withJSONObject: value)
+        respond(data, contentType: "application/json", status: status)
     }
-    func respond(_ data: Data, contentType: String) {
+    func respond(_ data: Data, contentType: String, status: Int = 200) {
         let response = HTTPURLResponse(
-            url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+            url: request.url!, statusCode: status, httpVersion: "HTTP/1.1",
             headerFields: ["Content-Type": contentType])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: data)
@@ -155,6 +202,182 @@ struct ChatGPTTests {
             try await Task.sleep(for: .milliseconds(10))
         }
         try #require(condition())
+    }
+
+    @Test func catalogOrderVisibilityAndDefaults() async throws {
+        let cases: [([[String: Any]], String, String, [String])] = [
+            (
+                [
+                    catalogModel("first", efforts: ["high", "low"]),
+                    catalogModel("gpt-6-luna", name: "GPT-6 Luna", efforts: ["medium", "low"]),
+                ],
+                "gpt-6-luna", "low", ["first", "gpt-6-luna"]
+            ),
+            (
+                [
+                    catalogModel("gpt-6-luna", visibility: "hidden"),
+                    catalogModel("first", efforts: ["high", "medium"]), catalogModel("last"),
+                ],
+                "first", "high", ["first", "last"]
+            ),
+            ([catalogModel("plain", efforts: nil)], "plain", "", ["plain"]),
+            ([catalogModel("empty", efforts: [])], "empty", "", ["empty"]),
+            (
+                [catalogModel("filtered", efforts: ["ultra", "future", "none", "high", "none"])],
+                "filtered", "none", ["filtered"]
+            ),
+        ]
+        for (catalog, slug, effort, order) in cases {
+            let session = MockHTTPProtocol.session(server: TestHTTP(models: catalog))
+            defer { session.invalidateAndCancel() }
+            let defaults = TestDefaults()
+            let model = Model(
+                chatGPT: ChatGPT(
+                    session: session, storage: StoredCredentials().storage,
+                    defaults: defaults), defaults: defaults)
+            #expect(!model.canSelectModel && !model.canSelectEffort && !model.canStartSession)
+            try await waitUntil { !model.working }
+            #expect(model.models.map(\.slug) == order)
+            #expect(model.modelSlug == slug && model.reasoningEffort == effort)
+            #expect(model.canSelectModel && model.canStartSession)
+            #expect(model.canSelectEffort == !effort.isEmpty)
+            #expect(defaults.string(forKey: "chatGPTModel") == slug)
+            if slug == "gpt-6-luna" { #expect(model.selectedModel?.displayName == "GPT-6 Luna") }
+            await model.shutdown()
+        }
+    }
+
+    @Test func modelChangesResetEffortAndValidSelectionsSurviveLaunch() async throws {
+        let server = TestHTTP(models: [
+            catalogModel("gpt-6-luna", efforts: ["medium", "low"]),
+            catalogModel("other", efforts: ["high", "low", "medium"]),
+        ])
+        let session = MockHTTPProtocol.session(server: server)
+        defer { session.invalidateAndCancel() }
+        let defaults = TestDefaults()
+        let stored = StoredCredentials()
+        let model = Model(
+            chatGPT: ChatGPT(session: session, storage: stored.storage, defaults: defaults),
+            defaults: defaults)
+        try await waitUntil { !model.working }
+        model.selectEffort("medium")
+        model.selectModel("other")
+        #expect(model.reasoningEffort == "low")
+        model.selectEffort("high")
+        model.selectModel("missing")
+        model.selectEffort("ultra")
+        #expect(model.modelSlug == "other" && model.reasoningEffort == "high")
+        model.working = true
+        model.selectModel("gpt-6-luna")
+        model.selectEffort("low")
+        #expect(!model.canSelectModel && !model.canSelectEffort)
+        #expect(model.modelSlug == "other" && model.reasoningEffort == "high")
+        model.working = false
+        model.state.live = true
+        model.selectModel("gpt-6-luna")
+        model.selectEffort("low")
+        #expect(!model.canSelectModel && !model.canSelectEffort && !model.canStartSession)
+        #expect(model.modelSlug == "other" && model.reasoningEffort == "high")
+        await model.shutdown()
+        let restored = Model(
+            chatGPT: ChatGPT(session: session, storage: stored.storage, defaults: defaults),
+            defaults: defaults)
+        try await waitUntil { !restored.working }
+        #expect(restored.modelSlug == "other" && restored.reasoningEffort == "high")
+        server.setCatalog([catalogModel("other", efforts: ["medium", "low"])])
+        restored.retryModels()
+        try await waitUntil { !restored.working }
+        #expect(restored.modelSlug == "other" && restored.reasoningEffort == "low")
+        server.setCatalog([catalogModel("first", efforts: ["medium"]), catalogModel("gpt-6-luna")])
+        restored.retryModels()
+        try await waitUntil { !restored.working }
+        #expect(restored.modelSlug == "gpt-6-luna" && restored.reasoningEffort == "low")
+        await restored.shutdown()
+    }
+
+    @Test func catalogFailureKeepsControlsDisabledAndRetryRecovers() async throws {
+        let server = TestHTTP()
+        server.setCatalog([], status: 503)
+        let session = MockHTTPProtocol.session(server: server)
+        defer { session.invalidateAndCancel() }
+        let defaults = TestDefaults()
+        let model = Model(
+            chatGPT: ChatGPT(
+                session: session, storage: StoredCredentials().storage,
+                defaults: defaults), defaults: defaults)
+        try await waitUntil { !model.working }
+        #expect(!model.catalogError.isEmpty && !model.account.isEmpty)
+        let invalidCatalogs: [[[String: Any]]] = [
+            [], [catalogModel("hidden", visibility: "hidden")],
+            [["slug": "missing-name", "visibility": "list"]],
+            [catalogModel("duplicate"), catalogModel("duplicate")],
+            [
+                [
+                    "slug": "malformed", "display_name": "Malformed", "visibility": "list",
+                    "supported_reasoning_levels": "low",
+                ]
+            ],
+        ]
+        for catalog in invalidCatalogs {
+            server.setCatalog(catalog)
+            model.retryModels()
+            #expect(model.working && model.models.isEmpty && model.catalogError.isEmpty)
+            #expect(!model.canSelectModel && !model.canSelectEffort && !model.canStartSession)
+            model.startSession()
+            try await waitUntil { !model.working }
+            #expect(!model.catalogError.isEmpty && model.modelSlug.isEmpty)
+            #expect(defaults.string(forKey: "chatGPTModel") == nil)
+        }
+        server.setCatalog([catalogModel("first", efforts: ["medium"])])
+        model.retryModels()
+        try await waitUntil { !model.working }
+        #expect(model.catalogError.isEmpty && model.canStartSession)
+        #expect(model.modelSlug == "first" && model.reasoningEffort == "medium")
+        model.authenticate()
+        try await waitUntil { !model.working }
+        #expect(model.account.isEmpty && model.models.isEmpty)
+        #expect(!model.canSelectModel && !model.canSelectEffort && !model.canStartSession)
+        model.retryModels()
+        #expect(!model.working)
+        await model.shutdown()
+    }
+
+    @Test func selectedModelAndEffortReachResponsesWithoutInventedLevels() async throws {
+        let server = TestHTTP(
+            output: .text,
+            models: [
+                catalogModel("gpt-6-luna", efforts: ["low", "high"]),
+                catalogModel("plain", efforts: nil), catalogModel("unknown", efforts: ["future"]),
+                catalogModel("none", efforts: ["none"]),
+            ])
+        let session = MockHTTPProtocol.session(server: server)
+        defer { session.invalidateAndCancel() }
+        let chatGPT = ChatGPT(
+            session: session, storage: StoredCredentials().storage, defaults: TestDefaults())
+        try await chatGPT.restore()
+        let models = try await chatGPT.listModels()
+        for (index, effort) in ["high", "", "", "none"].enumerated() {
+            try await chatGPT.prepareSession(model: models[index], effort: effort)
+            try await chatGPT.answer(input: [], language: "English") { _ in }
+            let request = try #require(server.requests.last)
+            #expect(request["model"] as? String == models[index].slug)
+            #expect(request["store"] as? Bool == false && request["stream"] as? Bool == true)
+            #expect(request["service_tier"] == nil)
+            if effort.isEmpty {
+                #expect(request["reasoning"] == nil)
+            } else {
+                #expect((request["reasoning"] as? [String: String])?["effort"] == effort)
+            }
+        }
+        do {
+            try await chatGPT.prepareSession(model: models[0], effort: "ultra")
+            Issue.record("Unsupported effort was accepted")
+        } catch {}
+        do {
+            try await chatGPT.answer(input: [], language: "English") { _ in }
+            Issue.record("An old session selection remained usable after failed preparation")
+        } catch {}
+        #expect(server.requests.count == 4)
     }
 
     @Test func callbackStopClosesAcceptedIncompleteRequest() async throws {
@@ -194,7 +417,7 @@ struct ChatGPTTests {
         defer { session.invalidateAndCancel() }
         let chatGPT = ChatGPT(session: session, storage: stored.storage, defaults: TestDefaults())
         try await chatGPT.restore()
-        let refresh = Task { try await chatGPT.prepareSession() }
+        let refresh = Task { try await chatGPT.listModels() }
         try await waitUntil { server.refreshPending }
         var entered = false
         let signOut = Task {
@@ -204,7 +427,7 @@ struct ChatGPTTests {
         try await waitUntil { entered }
         #expect(stored.events.isEmpty)
         do {
-            try await chatGPT.prepareSession()
+            _ = try await chatGPT.listModels()
             Issue.record("A new request was allowed during sign out")
         } catch {}
         server.finishRefresh()
@@ -229,7 +452,7 @@ struct ChatGPTTests {
         } catch {}
         #expect(stored.current != nil)
         #expect(chatGPT.credentials != nil)
-        try await chatGPT.prepareSession()
+        _ = try await chatGPT.listModels()
     }
 
     @Test func shutdownWaitsForRotatingRefreshToReachStorage() async throws {
@@ -238,27 +461,25 @@ struct ChatGPTTests {
         let session = MockHTTPProtocol.session(server: server)
         defer { session.invalidateAndCancel() }
         let chatGPT = ChatGPT(session: session, storage: stored.storage, defaults: TestDefaults())
-        let model = Model(chatGPT: chatGPT)
-        try await waitUntil { !model.working }
-        let refresh = Task { try await chatGPT.prepareSession() }
+        let model = Model(chatGPT: chatGPT, defaults: TestDefaults())
         try await waitUntil { server.refreshPending }
+        #expect(model.working && !model.canSelectModel && !model.canSelectEffort)
+        #expect(!model.canStartSession && model.models.isEmpty)
         var finished = false
-        refresh.cancel()
         let shutdown = Task {
             await model.shutdown()
             finished = true
         }
-        try await waitUntil { model.status == "Ready" && !model.working }
         try await Task.sleep(for: .milliseconds(50))
         #expect(!finished)
         #expect(stored.events.isEmpty)
         server.finishRefresh()
-        _ = try? await refresh.value
         await shutdown.value
         #expect(finished)
         #expect(stored.current?.refreshToken == "replacement-refresh")
         #expect(stored.events == ["save:replacement-refresh"])
         #expect(server.modelsRequested == 0)
+        #expect(model.models.isEmpty && !model.canStartSession)
     }
 
     @Test func refusalIsVisibleAndEmptyCompletionFails() async throws {
@@ -268,7 +489,8 @@ struct ChatGPTTests {
             let chatGPT = ChatGPT(
                 session: session, storage: StoredCredentials().storage, defaults: TestDefaults())
             try await chatGPT.restore()
-            try await chatGPT.prepareSession()
+            let models = try await chatGPT.listModels()
+            try await chatGPT.prepareSession(model: models[0], effort: "low")
             var text = ""
             var failed = false
             do { try await chatGPT.answer(input: [], language: "English") { text += $0 } } catch {

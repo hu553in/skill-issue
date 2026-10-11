@@ -22,7 +22,7 @@ final class Capture {
         try await speech.prepare(progress: progress)
     }
     func start(
-        microphone: String, text: (@Sendable ([TranscriptSegment]) -> Void)?,
+        microphone: String,
         failed: @escaping @MainActor @Sendable () -> Void
     ) async throws {
         guard await AVCaptureDevice.requestAccess(for: .audio),
@@ -42,7 +42,7 @@ final class Capture {
             display: display, excludingApplications: own, exceptingWindows: [])
         self.filter = filter
         origin = CMTimeGetSeconds(CMClockGetTime(CMClockGetHostTimeClock()))
-        try await speech.start(changed: text, failed: { Task { @MainActor in failed() } })
+        try await speech.start(failed: { Task { @MainActor in failed() } })
         do {
             let sink = AudioSink(speech: speech, origin: origin, failed: failed)
             self.sink = sink

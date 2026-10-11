@@ -12,7 +12,6 @@ import Testing
     try #require(!model.working)
 
     model.account = "fake@example.invalid"
-    model.mode = "answer"
     model.state.live = true
     model.answer()
     model.state.answers[0].text = "A partial suggestion"

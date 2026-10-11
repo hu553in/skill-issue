@@ -55,7 +55,7 @@ test("the welcome screen and malformed links have clear outcomes", async ({
   await expect(page.getByRole("status")).toHaveText(failure);
 });
 
-test("encrypted answers render Markdown safely and expose transcript and session status", async ({
+test("encrypted answers render Markdown safely and expose session status", async ({
   page,
   relay,
 }) => {
@@ -119,40 +119,12 @@ test("encrypted answers render Markdown safely and expose transcript and session
   );
   await expect(page.getByRole("status")).toHaveText("Listening");
   await expect(pane.locator("article")).toHaveAttribute("aria-busy", "false");
-  await relay.publish({
-    ...state,
-    mode: "transcript",
-    transcript: [
-      {
-        end: 67,
-        id: "computer",
-        source: "computer",
-        start: 65,
-        text: "How does a hash map work?",
-      },
-      {
-        end: 70,
-        id: "microphone",
-        source: "microphone",
-        start: 68,
-        text: "I would use a hash function.",
-      },
-    ],
-  });
-  const transcript = page.getByRole("region", { name: "Live transcript" });
-  await expect(transcript.getByText("How does a hash map work?")).toBeVisible();
-  await expect(
-    transcript.getByText("I would use a hash function.")
-  ).toBeVisible();
-  await expect(transcript.locator("time")).toHaveText(["1:05", "1:08"]);
   await relay.writer.close();
   await expect(page.getByRole("status")).toHaveText("Mac disconnected");
   await relay.end();
   await expect(page.getByRole("status")).toHaveText("Session ended");
   await expect(page.locator("footer")).toHaveCount(0);
-  await expect(
-    transcript.getByText("I would use a hash function.")
-  ).toBeVisible();
+  await expect(pane.getByText("A streamed conclusion.")).toBeVisible();
   expect(errors).toEqual([]);
 });
 

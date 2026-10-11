@@ -1,10 +1,3 @@
-interface TranscriptSegment {
-  id: string;
-  source: "computer" | "microphone";
-  start: number;
-  end: number;
-  text: string;
-}
 interface AnswerCard {
   id: string;
   text: string;
@@ -22,8 +15,6 @@ export interface ViewState {
   selectedID?: string | null;
   selection: number;
   command?: ViewerCommand | null;
-  transcript: TranscriptSegment[];
-  mode: "answer" | "transcript";
   fontSize: number;
   language: string;
   modifiers: string;
@@ -40,10 +31,8 @@ export const empty: ViewState = {
   fontSize: 20,
   language: "English",
   live: false,
-  mode: "answer",
   modifiers: "⌃⌥⌘",
   selection: 0,
-  transcript: [],
   version: 1,
 };
 export const failure = "Couldn't complete that. Try again.";
@@ -110,10 +99,8 @@ export async function decrypt(
     state.version !== 1 ||
     typeof state.live !== "boolean" ||
     !Array.isArray(state.answers) ||
-    !Array.isArray(state.transcript) ||
     !Number.isSafeInteger(state.selection) ||
     state.selection < 0 ||
-    !["answer", "transcript"].includes(state.mode) ||
     !finite(state.fontSize) ||
     state.fontSize < 16 ||
     state.fontSize > 40 ||
@@ -138,19 +125,6 @@ export async function decrypt(
         !["generating", "complete", "incomplete", "failed"].includes(
           card.status
         )
-    )
-  ) {
-    throw new Error(failure);
-  }
-  if (
-    state.transcript.some(
-      (line: TranscriptSegment) =>
-        typeof line.id !== "string" ||
-        !["computer", "microphone"].includes(line.source) ||
-        !finite(line.start) ||
-        !finite(line.end) ||
-        line.end < line.start ||
-        typeof line.text !== "string"
     )
   ) {
     throw new Error(failure);

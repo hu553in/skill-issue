@@ -67,8 +67,7 @@ body {
   scrollbar-width: thin;
 }
 
-.answer,
-.transcript {
+.answer {
   font-size: var(--reading-size);
   max-width: 68ch;
   margin-inline: auto;
@@ -196,19 +195,10 @@ kbd {
   font-weight: 600;
 }
 
-.empty {
-  padding-block-start: min(12vh, 80px);
-}
-
 .empty p {
   color: #62666b;
   font-size: 0.9em;
   max-width: 32ch;
-}
-
-.note {
-  color: #62666b;
-  font-size: 0.75em;
 }
 
 .error {
@@ -217,32 +207,6 @@ kbd {
   color: #8b3831;
   border-radius: 6px;
   font-size: 0.8em;
-}
-
-.speaker {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  gap: 12px;
-  margin-block-end: 5px;
-  color: #62666b;
-  font-size: 0.68em;
-  font-weight: 600;
-}
-
-.speaker time {
-  font-variant-numeric: tabular-nums;
-  font-weight: 400;
-}
-
-.transcript section {
-  margin-block-end: 24px;
-}
-
-.welcome {
-  width: min(540px, 100%);
-  margin: 15vh auto 0;
-  padding: 24px;
 }
 
 .welcome h1 {
@@ -262,8 +226,6 @@ kbd {
   .meta,
   .hints,
   .empty p,
-  .note,
-  .speaker,
   blockquote,
   .welcome p {
     color: #a5a8ac;

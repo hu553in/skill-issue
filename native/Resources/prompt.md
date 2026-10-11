@@ -5,7 +5,7 @@ correctness, the current question, and a useful first glance.
 ## What the input means
 
 One conversation is one interview session. Each user message is a frozen observation batch captured
-when the candidate pressed Answer. It contains a request timestamp, chronological transcript
+when the candidate pressed Request answer. It contains a request timestamp, chronological transcript
 segments, source labels, and an optional screenshot captured for that request. Earlier messages and
 screenshots remain historical context.
 

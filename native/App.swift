@@ -20,11 +20,13 @@ private struct AnswerLanguage: Decodable, Sendable {
 
 @MainActor
 final class Model: ObservableObject {
-    @Published var relayURL =
-        UserDefaults.standard.string(forKey: "relayURL") ?? "http://127.0.0.1:8787"
-    @Published var microphone = UserDefaults.standard.string(forKey: "microphone") ?? ""
-    @Published var language = UserDefaults.standard.string(forKey: "language") ?? "English"
-    @Published var mode = UserDefaults.standard.string(forKey: "mode") ?? "answer"
+    @Published var relayURL: String
+    @Published var microphone: String
+    @Published var language: String
+    @Published private(set) var models: [ChatGPTModel] = []
+    @Published private(set) var modelSlug = ""
+    @Published private(set) var reasoningEffort = ""
+    @Published private(set) var catalogError = ""
     @Published var account = ""
     @Published var link: URL?
     @Published var working = false
@@ -34,6 +36,7 @@ final class Model: ObservableObject {
     @Published var error = ""
     @Published var state = ViewState()
     private let chatGPT: ChatGPT
+    private let defaults: UserDefaults
     private let capture = Capture()
     private var relay: Relay?
     private var history = InterviewHistory()
@@ -45,46 +48,126 @@ final class Model: ObservableObject {
     private var monitorTask: Task<Void, Never>?
     private var startTask: Task<Void, Never>?
     private var endingTask: Task<Void, Never>?
+    private var settingsTask: Task<Void, Never>?
     private var terminating = false
     private var captureFailure: UUID?
-    var canAnswer: Bool { state.live && !working && !account.isEmpty && mode == "answer" }
+    var canAnswer: Bool { state.live && !working && !account.isEmpty }
+    var selectedModel: ChatGPTModel? { models.first { $0.slug == modelSlug } }
+    var canSelectModel: Bool { !terminating && !working && !state.live && !models.isEmpty }
+    var canSelectEffort: Bool { canSelectModel && !(selectedModel?.efforts.isEmpty ?? true) }
+    var canStartSession: Bool {
+        guard !terminating, !working, !state.live, !account.isEmpty, let model = selectedModel
+        else {
+            return false
+        }
+        return model.efforts.isEmpty
+            ? reasoningEffort.isEmpty : model.efforts.contains(reasoningEffort)
+    }
 
-    init(chatGPT: ChatGPT = ChatGPT()) {
+    init(chatGPT: ChatGPT = ChatGPT(), defaults: UserDefaults = .standard) {
         self.chatGPT = chatGPT
-        let savedFontSize = UserDefaults.standard.integer(forKey: "fontSize")
-        if (16...40).contains(savedFontSize) { state.fontSize = savedFontSize }
+        self.defaults = defaults
+        relayURL = defaults.string(forKey: "relayURL") ?? "http://127.0.0.1:8787"
+        microphone = defaults.string(forKey: "microphone") ?? ""
+        language = defaults.string(forKey: "language") ?? "English"
+        let savedFontSize = defaults.integer(forKey: "fontSize")
+        if fontSizeRange.contains(savedFontSize) { state.fontSize = savedFontSize }
         working = true
         status = "Loading…"
-        Task {
+        settingsTask = Task {
+            defer { finishSettings() }
             do {
                 try await chatGPT.restore()
+                try Task.checkCancellation()
                 account = chatGPT.credentials?.email ?? ""
-            } catch { showError() }
-            working = false
-            status = "Ready"
+                await loadModels()
+            } catch { if !Task.isCancelled { showError() } }
         }
     }
     func authenticate() {
-        guard !working, !state.live else { return }
+        guard !terminating, !working, !state.live else { return }
         working = true
         error = ""
-        Task {
+        clearModels()
+        settingsTask = Task {
+            defer { finishSettings() }
             do {
                 if account.isEmpty {
                     try await chatGPT.signIn()
                 } else {
                     try await chatGPT.signOut()
                 }
-                account = chatGPT.credentials?.email ?? ""
             } catch {
-                account = chatGPT.credentials?.email ?? ""
-                showError()
+                if !Task.isCancelled { showError() }
             }
-            working = false
+            guard !Task.isCancelled else { return }
+            account = chatGPT.credentials?.email ?? ""
+            await loadModels()
         }
     }
-    func startSession() {
+    func retryModels() {
         guard !terminating, !working, !state.live, !account.isEmpty else { return }
+        working = true
+        clearModels()
+        settingsTask = Task {
+            defer { finishSettings() }
+            await loadModels()
+        }
+    }
+    private func loadModels() async {
+        guard !account.isEmpty else { return }
+        status = "Loading models…"
+        do {
+            let available = try await chatGPT.listModels()
+            try Task.checkCancellation()
+            let savedModel = defaults.string(forKey: "chatGPTModel")
+            let selected =
+                available.first { $0.slug == savedModel }
+                ?? available.first { $0.slug == "gpt-6-luna" } ?? available[0]
+            let savedEffort = defaults.string(forKey: "chatGPTReasoningEffort") ?? ""
+            models = available
+            modelSlug = selected.slug
+            reasoningEffort =
+                selected.slug == savedModel && selected.efforts.contains(savedEffort)
+                ? savedEffort : selected.defaultEffort
+            saveModelSelection()
+        } catch {
+            if !Task.isCancelled {
+                catalogError = "Could not load ChatGPT models. Retry or sign in again."
+            }
+        }
+    }
+    private func clearModels() {
+        models = []
+        modelSlug = ""
+        reasoningEffort = ""
+        catalogError = ""
+    }
+    private func finishSettings() {
+        settingsTask = nil
+        working = false
+        status = "Ready"
+    }
+    func selectModel(_ slug: String) {
+        guard canSelectModel, slug != modelSlug,
+            let model = models.first(where: { $0.slug == slug })
+        else { return }
+        modelSlug = slug
+        reasoningEffort = model.defaultEffort
+        saveModelSelection()
+    }
+    func selectEffort(_ effort: String) {
+        guard canSelectEffort, selectedModel?.efforts.contains(effort) == true else { return }
+        reasoningEffort = effort
+        saveModelSelection()
+    }
+    private func saveModelSelection() {
+        defaults.set(modelSlug, forKey: "chatGPTModel")
+        defaults.set(reasoningEffort, forKey: "chatGPTReasoningEffort")
+    }
+    func startSession() {
+        guard canStartSession, let model = selectedModel else { return }
+        let effort = reasoningEffort
         publishTask?.cancel()
         monitorTask?.cancel()
         cancelAnswer()
@@ -97,19 +180,20 @@ final class Model: ObservableObject {
         currentRequest = nil
         snapshotTask = nil
         captureFailure = nil
-        state = ViewState(mode: mode, fontSize: state.fontSize, language: language)
+        state = ViewState(fontSize: state.fontSize, language: language)
         for (key, value) in [
-            "relayURL": relayURL, "microphone": microphone, "language": language, "mode": mode,
-        ] { UserDefaults.standard.set(value, forKey: key) }
+            "relayURL": relayURL, "microphone": microphone, "language": language,
+        ] { defaults.set(value, forKey: key) }
         startTask = Task { [self] in
             defer { startTask = nil }
             do {
+                try Task.checkCancellation()
                 try await capture.prepare { [weak self] message in
                     Task { @MainActor in if self?.sessionID == session { self?.status = message } }
                 }
                 try Task.checkCancellation()
                 status = "Connecting ChatGPT…"
-                try await chatGPT.prepareSession()
+                try await chatGPT.prepareSession(model: model, effort: effort)
                 try Task.checkCancellation()
                 status = "Connecting viewer…"
                 let relay = try await Relay.create(
@@ -126,17 +210,8 @@ final class Model: ObservableObject {
                             ? "Open the viewer on your phone." : "Viewer ready · \(count) connected"
                 }
                 status = "Starting capture…"
-                var text: (@Sendable ([TranscriptSegment]) -> Void)?
-                if mode == "transcript" {
-                    text = { @Sendable [weak self] transcript in
-                        Task { @MainActor in
-                            guard let self, self.sessionID == session else { return }
-                            self.state.transcript = transcript
-                        }
-                    }
-                }
                 try await capture.start(
-                    microphone: microphone, text: text,
+                    microphone: microphone,
                     failed: { [weak self] in self?.captureFailed(session: session) })
                 try Task.checkCancellation()
                 guard captureFailure != session else { throw AppFailure.failed }
@@ -277,7 +352,7 @@ final class Model: ObservableObject {
         currentRequest = nil
     }
     func navigate(_ direction: Int) {
-        guard state.live, mode == "answer" else { return }
+        guard state.live else { return }
         state.select(direction)
         publish()
     }
@@ -288,10 +363,11 @@ final class Model: ObservableObject {
     }
     func zoom(_ direction: Int) {
         guard state.live else { return }
-        let size = min(40, max(16, state.fontSize + direction * 2))
+        let size = min(
+            fontSizeRange.upperBound, max(fontSizeRange.lowerBound, state.fontSize + direction * 2))
         guard size != state.fontSize else { return }
         state.fontSize = size
-        UserDefaults.standard.set(size, forKey: "fontSize")
+        defaults.set(size, forKey: "fontSize")
         publish()
     }
     private func publish() { do { try relay?.publish(state) } catch { endSession(failed: true) } }
@@ -312,7 +388,9 @@ final class Model: ObservableObject {
     func openViewer() { if let link { NSWorkspace.shared.open(link) } }
     func shutdown() async {
         terminating = true
+        settingsTask?.cancel()
         startTask?.cancel()
+        await settingsTask?.value
         await startTask?.value
         await endSession().value
         await chatGPT.finishPendingRefresh()
@@ -322,6 +400,7 @@ final class Model: ObservableObject {
 private struct SettingsView: View {
     @ObservedObject var model: Model
     let toggleIcon: () -> Void
+    var maximumHeight: CGFloat?
     private var microphones: [AVCaptureDevice] {
         AVCaptureDevice.DiscoverySession(
             deviceTypes: [.microphone, .external], mediaType: .audio, position: .unspecified
@@ -332,21 +411,65 @@ private struct SettingsView: View {
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            VStack(alignment: .leading, spacing: 5) {
-                Text("Skill Issue").font(.title2.weight(.semibold))
-                Text(model.status).foregroundStyle(.secondary)
+            SettingsHeader(
+                status: model.status, working: model.working, live: model.state.live,
+                error: model.error, catalogError: model.catalogError, retry: model.retryModels
+            )
+            .fixedSize(horizontal: false, vertical: true)
+            ViewThatFits(in: .vertical) {
+                settingsContent.fixedSize(horizontal: false, vertical: true)
+                ScrollView {
+                    settingsContent
+                }.scrollIndicators(.visible)
             }
+            settingsFooter.fixedSize(horizontal: false, vertical: true)
+        }.padding(26).frame(width: 520).frame(maxHeight: maximumHeight)
+            // Size the AppKit window to the content after applying the screen height limit.
+            .fixedSize(horizontal: true, vertical: true)
+    }
+    private var settingsContent: some View {
+        VStack(alignment: .leading, spacing: 20) {
             VStack(alignment: .leading, spacing: 8) {
                 Text("ChatGPT").font(.headline)
                 if !model.account.isEmpty {
                     Text(model.account).font(.subheadline).foregroundStyle(.secondary)
                 }
                 Button(
-                    model.account.isEmpty ? "Continue with ChatGPT" : "Sign out",
+                    model.account.isEmpty ? "Sign in with ChatGPT" : "Sign out",
                     action: model.authenticate
                 ).disabled(model.working || model.state.live)
             }
             VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 12) {
+                    Picker(
+                        "Model",
+                        selection: Binding(get: { model.modelSlug }, set: model.selectModel)
+                    ) {
+                        if model.models.isEmpty {
+                            Text(
+                                model.account.isEmpty
+                                    ? "Sign in first"
+                                    : model.working ? "Loading…" : "Unavailable"
+                            ).tag("")
+                        }
+                        ForEach(model.models) { Text($0.displayName).tag($0.slug) }
+                    }.disabled(!model.canSelectModel)
+                    Picker(
+                        "Reasoning effort",
+                        selection: Binding(get: { model.reasoningEffort }, set: model.selectEffort)
+                    ) {
+                        if model.selectedModel?.efforts.isEmpty ?? true {
+                            Text(
+                                !model.account.isEmpty && model.working
+                                    ? "Loading…" : "Not available"
+                            ).tag("")
+                        }
+                        ForEach(model.selectedModel?.efforts ?? [], id: \.self) {
+                            Text($0).tag($0)
+                        }
+                    }.disabled(!model.canSelectEffort)
+                    Spacer(minLength: 0)
+                }
                 Picker("Microphone", selection: $model.microphone) {
                     Text("System default").tag("")
                     ForEach(microphones, id: \.uniqueID) { Text($0.localizedName).tag($0.uniqueID) }
@@ -354,18 +477,9 @@ private struct SettingsView: View {
                 Picker("Answer language", selection: $model.language) {
                     ForEach(AnswerLanguage.all, id: \.name) { Text($0.label).tag($0.name) }
                 }
-                Picker("Viewer", selection: $model.mode) {
-                    Text("Answers").tag("answer")
-                    Text("Transcript preview").tag("transcript")
-                }
-                LabeledContent("Viewer server") {
+                LabeledContent("Viewer endpoint") {
                     TextField("https://…", text: $model.relayURL).textFieldStyle(.roundedBorder)
                 }
-                Text(
-                    "Main display, computer audio and microphone. Speech is recognized locally in English, Russian and other supported languages. The model downloads once, before your first session."
-                )
-                .font(.caption).foregroundStyle(.secondary).fixedSize(
-                    horizontal: false, vertical: true)
             }.disabled(model.working || model.state.live)
             if let link = model.link {
                 HStack(spacing: 18) {
@@ -385,33 +499,44 @@ private struct SettingsView: View {
                     }
                 }
             }
-            HStack {
-                Button("Previous answer") { model.navigate(-1) }.disabled(
-                    !model.canAnswer || answerIndex <= 0)
-                Button("Next answer") { model.navigate(1) }.disabled(
-                    !model.canAnswer || answerIndex >= model.state.answers.count - 1)
-                Spacer()
-                Button("Read up") { model.scroll(-1) }.disabled(!model.state.live)
-                Button("Read down") { model.scroll(1) }.disabled(!model.state.live)
+            SettingsControls(
+                live: model.state.live, canAnswer: model.canAnswer,
+                canGoBack: model.canAnswer && answerIndex > 0,
+                canGoForward: model.canAnswer && answerIndex < model.state.answers.count - 1,
+                fontSize: model.state.fontSize, answer: model.answer, navigate: model.navigate,
+                scroll: model.scroll, zoom: model.zoom)
+        }
+    }
+    private var settingsFooter: some View {
+        HStack {
+            Button("Quit", role: .destructive) { NSApp.terminate(nil) }
+                .keyboardShortcut("q", modifiers: .command)
+                .foregroundStyle(.red)
+            menuBarIconButton
+            Spacer()
+            if model.state.live {
+                sessionButton.buttonStyle(.bordered)
+            } else {
+                sessionButton.buttonStyle(.borderedProminent)
             }
-            VStack(alignment: .leading, spacing: 5) {
-                Text("Hold \(shortcutModifiers) on your Mac").font(.subheadline.weight(.medium))
-                Text("Space: answer · ↑↓: read · ←→: history · +/−: text size · H: hide/show icon")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(
-                        horizontal: false, vertical: true)
+        }
+    }
+    private var menuBarIconButton: some View {
+        let title = model.iconVisible ? "Hide menu bar icon" : "Show menu bar icon"
+        return Button(action: toggleIcon) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text(title)
+                ShortcutHint(key: .menuBarIcon, includeModifiers: true)
+                    .opacity(0.75).accessibilityHidden(true)
             }
-            if !model.error.isEmpty { Text(model.error).font(.callout) }
-            HStack {
-                Button(model.iconVisible ? "Hide icon" : "Show icon", action: toggleIcon)
-                Button("Quit") { NSApp.terminate(nil) }.keyboardShortcut("q", modifiers: .command)
-                Spacer()
-                Button("Answer", action: model.answer).disabled(!model.canAnswer)
-                Button(model.state.live ? "Stop session" : "Start session") {
-                    if model.state.live { model.stopSession() } else { model.startSession() }
-                }
-                .buttonStyle(.borderedProminent).disabled(model.working || model.account.isEmpty)
-            }
-        }.padding(26).frame(width: 520).fixedSize(horizontal: true, vertical: true)
+        }
+        .accessibilityLabel(title)
+        .accessibilityHint(ShortcutKey.menuBarIcon.hint)
+    }
+    private var sessionButton: some View {
+        Button(model.state.live ? "Stop session" : "Start session") {
+            if model.state.live { model.stopSession() } else { model.startSession() }
+        }.disabled(model.working || (!model.state.live && !model.canStartSession))
     }
     private func qrCode(_ value: String) -> NSImage? {
         let filter = CIFilter.qrCodeGenerator()
@@ -427,18 +552,29 @@ private struct SettingsView: View {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let model = Model()
     private var item: NSStatusItem!
     private var window: NSWindow?
     private var shortcuts: [EventHotKeyRef] = []
     private var held: Set<UInt32> = []
+    private var quitPending = false
     func applicationDidFinishLaunching(_ notification: Notification) {
-        item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         model.iconVisible = item.isVisible
-        item.button?.image = NSImage(
-            systemSymbolName: "arrow.up.forward.square",
-            accessibilityDescription: "Skill Issue")
+        if let symbol = NSImage(
+            systemSymbolName: "tortoise.fill",
+            accessibilityDescription: "Skill Issue"
+        )?.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 16, weight: .medium)) {
+            // The status button clips the tortoise's feet when given a symbol image directly.
+            let image = NSImage(size: symbol.size, flipped: false) { rect in
+                symbol.draw(in: rect)
+                return true
+            }
+            image.isTemplate = true
+            image.accessibilityDescription = "Skill Issue"
+            item.button?.image = image
+        }
         item.button?.target = self
         item.button?.action = #selector(toggleSettings)
         let keys = [
@@ -484,6 +620,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return noErr
             }, 2, &events, opaque, nil)
         if installed != noErr { model.error = failureMessage }
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(screenParametersChanged),
+            name: NSApplication.didChangeScreenParametersNotification, object: nil)
         showSettings()
     }
     private func hotkey(_ id: UInt32, released: Bool) {
@@ -523,15 +662,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
             window.title = "Settings"
             window.isReleasedWhenClosed = false
+            window.delegate = self
+            self.window = window
             window.contentView = NSHostingView(
                 rootView: SettingsView(
                     model: model, toggleIcon: { [weak self] in self?.toggleIcon() }))
+            updateSettingsBounds()
             window.center()
-            self.window = window
         }
+        updateSettingsBounds()
         if window?.isMiniaturized == true { window?.deminiaturize(nil) }
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+    func windowDidChangeScreen(_ notification: Notification) { updateSettingsBounds() }
+    func windowDidResize(_ notification: Notification) { updateSettingsBounds() }
+    @objc private func screenParametersChanged(_ notification: Notification) {
+        updateSettingsBounds()
+    }
+    private func updateSettingsBounds() {
+        guard let window, let screen = window.screen ?? NSScreen.main,
+            let host = window.contentView as? NSHostingView<SettingsView>
+        else { return }
+        let visible = screen.visibleFrame
+        let height = window.contentRect(forFrameRect: visible).height
+        if host.rootView.maximumHeight != height {
+            host.rootView.maximumHeight = height
+            host.layoutSubtreeIfNeeded()
+        }
+        let frame = window.frame
+        let y = min(max(frame.minY, visible.minY), visible.maxY - frame.height)
+        if y != frame.minY { window.setFrameOrigin(NSPoint(x: frame.minX, y: y)) }
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool)
         -> Bool
@@ -540,9 +701,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        Task {
-            await model.shutdown()
-            sender.reply(toApplicationShouldTerminate: true)
+        guard !quitPending else { return .terminateLater }
+        showSettings()
+        guard let window else { return .terminateCancel }
+        quitPending = true
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Quit Skill Issue?"
+        alert.informativeText = "Any active session will stop. Session history is not saved."
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Quit").hasDestructiveAction = true
+        alert.beginSheetModal(for: window) { [self] response in
+            guard response == .alertSecondButtonReturn else {
+                quitPending = false
+                sender.reply(toApplicationShouldTerminate: false)
+                return
+            }
+            Task {
+                await model.shutdown()
+                sender.reply(toApplicationShouldTerminate: true)
+            }
         }
         return .terminateLater
     }

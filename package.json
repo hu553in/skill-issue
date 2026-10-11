@@ -7,8 +7,8 @@
   "type": "module",
   "scripts": {
     "setup:swift": "brew install swiftlint shfmt",
-    "dev": "bun run build:web && wrangler dev --port 8787",
-    "build": "bun run build:web && bun run build:swift",
+    "dev": "bun build:web && wrangler dev --port 8787",
+    "build": "bun build:web && bun build:swift",
     "build:web": "vite build web --outDir dist && bun scripts/notices.ts web web/dist/notices",
     "build:swift": "bash scripts/package.sh debug",
     "build:release": "bash scripts/package.sh release",
@@ -38,11 +38,11 @@
     "test:sanitize": "swift test --scratch-path .build/thread-sanitizer --jobs 4 --force-resolved-versions --sanitize thread",
     "test:asr": "bash scripts/test-asr.sh",
     "check:web": "bun lint:web && bun check:hooks && bun check:workflows && bun check:renovate && bun check:types && bun check:unused:web && bun check:vulns && bun test:coverage:web && bun check:integration:web",
-    "check:swift": "bun lint:swift && bun check:plist && bun test:coverage:swift && bun check:unused:swift && bun run build:release && bun check:integration:swift",
+    "check:swift": "bun lint:swift && bun check:plist && bun test:coverage:swift && bun check:unused:swift && bun build:release && bun check:integration:swift",
     "check": "bun check:web && bun check:swift",
     "check:fix": "bun lint:fix && bun check",
     "playwright:install": "playwright install --only-shell chromium",
-    "deploy": "bun run build:web && wrangler deploy",
+    "deploy": "bun build:web && wrangler deploy",
     "prepare": "if [ -n \"${CI:-}\" ] || [ \"${LEFTHOOK:-}\" = \"0\" ]; then exit 0; fi; lefthook install"
   },
   "dependencies": {

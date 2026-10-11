@@ -70,7 +70,7 @@ final class ChatGPT {
     private let defaults: UserDefaults
     private var discovery: [String: Any]?
     private var refreshTask: Task<String, Error>?
-    private var sessionModel: String?
+    private var sessionConfiguration: (model: String, effort: String?)?
     private var signingOut = false
 
     init(
@@ -240,20 +240,29 @@ final class ChatGPT {
         return token
     }
 
-    func prepareSession() async throws {
+    func listModels() async throws -> [ChatGPTModel] {
         let access = try await accessToken()
         try Task.checkCancellation()
         var request = URLRequest(url: URL(string: "\(resource)/models")!)
         request.setValue("Bearer \(access)", forHTTPHeaderField: "Authorization")
         let list = try await json(request)
         guard let models = list["models"] as? [[String: Any]] else { throw AppFailure.failed }
-        let available = models.filter { $0["visibility"] as? String == "list" }
-        guard
-            let model =
-                (available.first { $0["slug"] as? String == "gpt-6.1-sol" } ?? available.first)?[
-                    "slug"] as? String
-        else { throw AppFailure.failed }
-        sessionModel = model
+        let available = try models.filter { $0["visibility"] as? String == "list" }
+            .map { try ChatGPTModel(fields: $0) }
+        guard !available.isEmpty, Set(available.map(\.slug)).count == available.count else {
+            throw AppFailure.failed
+        }
+        return available
+    }
+
+    func prepareSession(model: ChatGPTModel, effort: String) async throws {
+        sessionConfiguration = nil
+        guard model.efforts.isEmpty ? effort.isEmpty : model.efforts.contains(effort) else {
+            throw AppFailure.failed
+        }
+        _ = try await accessToken()
+        try Task.checkCancellation()
+        sessionConfiguration = (model.slug, effort.isEmpty ? nil : effort)
     }
 
     func finishPendingRefresh() async {
@@ -269,7 +278,7 @@ final class ChatGPT {
         let old = credentials
         try storage.delete()
         credentials = nil
-        sessionModel = nil
+        sessionConfiguration = nil
         defaults.removeObject(forKey: "issuedClientID")
         if let old {
             let config = try await configuration()
@@ -291,7 +300,7 @@ final class ChatGPT {
     }
 
     func answer(input: [[String: Any]], language: String, delta: (String) -> Void) async throws {
-        guard let model = sessionModel else { throw AppFailure.failed }
+        guard let configuration = sessionConfiguration else { throw AppFailure.failed }
         let access = try await accessToken()
         try Task.checkCancellation()
         let prompt = try String(
@@ -303,12 +312,13 @@ final class ChatGPT {
         request.timeoutInterval = 180
         request.setValue("Bearer \(access)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "model": model, "store": false, "stream": true,
-            "reasoning": ["effort": "low"],
+        var body: [String: Any] = [
+            "model": configuration.model, "store": false, "stream": true,
             "instructions": prompt + "\nTrusted session setting: output language is \(language).",
             "input": input,
-        ])
+        ]
+        if let effort = configuration.effort { body["reasoning"] = ["effort": effort] }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (bytes, response) = try await session.bytes(for: request)
         #if DEBUG
             FileHandle.standardError.write(

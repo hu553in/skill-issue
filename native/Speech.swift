@@ -10,10 +10,8 @@ final class SpeechEngine: @unchecked Sendable {
         label: "com.github.hu553in.skill-issue.speech", qos: .userInitiated)
     private var model: NemotronStreamingASRModel?
     private var tracks: [AudioSource: Track] = [:]
-    private var committed: [TranscriptSegment] = []
     private var epoch = 0
     private var active = false
-    private var changed: (@Sendable ([TranscriptSegment]) -> Void)?
     private var failed: (@Sendable () -> Void)?
     private let pendingLock = NSLock()
     private var pendingFrames = 0
@@ -87,19 +85,14 @@ final class SpeechEngine: @unchecked Sendable {
             }
         }
     }
-    func start(
-        changed: (@Sendable ([TranscriptSegment]) -> Void)?,
-        failed: @escaping @Sendable () -> Void
-    ) async throws {
+    func start(failed: @escaping @Sendable () -> Void) async throws {
         try await withCheckedThrowingContinuation {
             (continuation: CheckedContinuation<Void, Error>) in
             queue.async { [self] in
                 do {
                     guard model != nil else { throw AppFailure.failed }
-                    self.changed = changed
                     self.failed = failed
                     tracks = [:]
-                    committed = []
                     epoch = 0
                     active = true
                     continuation.resume()
@@ -139,7 +132,6 @@ final class SpeechEngine: @unchecked Sendable {
                 track.frames += samples.count
                 if let last = updates.last {
                     track.update = last
-                    publish()
                 }
             } catch { failed?() }
         }
@@ -157,10 +149,8 @@ final class SpeechEngine: @unchecked Sendable {
                     }
                 }
                 let batch = segments()
-                if changed != nil { committed.append(contentsOf: batch) }
                 tracks = [:]
                 epoch += 1
-                publish()
                 completion(.success(batch))
             } catch {
                 if active { failed?() }
@@ -173,8 +163,6 @@ final class SpeechEngine: @unchecked Sendable {
             queue.async { [self] in
                 active = false
                 tracks = [:]
-                committed = []
-                changed = nil
                 failed = nil
                 continuation.resume()
             }
@@ -213,11 +201,5 @@ final class SpeechEngine: @unchecked Sendable {
             }
         }
         return result.sorted { $0.start == $1.start ? $0.id < $1.id : $0.start < $1.start }
-    }
-    private func publish() {
-        changed?(
-            (committed + segments()).sorted {
-                $0.start == $1.start ? $0.id < $1.id : $0.start < $1.start
-            })
     }
 }

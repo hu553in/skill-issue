@@ -4,6 +4,7 @@ import Foundation
 enum AppFailure: Error { case failed }
 let failureMessage = "Couldn't complete that. Try again."
 let shortcutModifiers = "⌃⌥⌘"
+let fontSizeRange = 16...40
 let maximumPacket = 4_000_000
 
 extension Data {
@@ -47,8 +48,6 @@ struct ViewState: Codable, Equatable, Sendable {
     var selectedID: String?
     var selection = 0
     var command: ViewerCommand?
-    var transcript: [TranscriptSegment] = []
-    var mode = "answer"
     var fontSize = 20
     var language = "English"
     // Codable sends the shortcut reminder to the web viewer.

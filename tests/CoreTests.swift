@@ -88,7 +88,7 @@ func twoSourcesAndAnswerCuts() async throws {
         url: directory.appendingPathComponent("ru_constraints.wav"), targetSampleRate: 16000)
     let engine = SpeechEngine()
     try await engine.prepare(progress: { _ in })
-    try await engine.start(changed: nil, failed: {})
+    try await engine.start(failed: {})
     for offset in stride(from: 0, to: max(english.count, russian.count), by: 5120) {
         if offset < english.count {
             engine.receive(
@@ -126,7 +126,7 @@ func twoSourcesAndAnswerCuts() async throws {
     }
     #expect(silence.isEmpty)
     await engine.stop()
-    try await engine.start(changed: { _ in }, failed: {})
+    try await engine.start(failed: {})
     engine.receive(english, source: .computer, seconds: 0)
     let restart = try await withCheckedThrowingContinuation { continuation in
         engine.freeze { continuation.resume(with: $0) }

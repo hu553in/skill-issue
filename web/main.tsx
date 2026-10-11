@@ -311,8 +311,7 @@ const App = () => {
       return;
     }
     const element = pane.current;
-    const id =
-      state.mode === "transcript" ? "transcript" : (selectedID ?? "empty");
+    const id = selectedID ?? "empty";
     if (element) {
       restoreAnchor(
         element,
@@ -327,7 +326,7 @@ const App = () => {
       if (
         !update.reconnect &&
         element &&
-        (state.mode === "transcript" || state.command.answerID === selectedID)
+        state.command.answerID === selectedID
       ) {
         scrollPage(element, state.command.direction);
       }
@@ -377,9 +376,13 @@ const App = () => {
 
   if (!fragment) {
     return (
-      <main className="welcome">
-        <h1>Skill Issue</h1>
-        <p>Open the private viewer link from your Mac, or scan its QR code.</p>
+      <main className="viewer">
+        <div className="reading welcome">
+          <h1>Skill Issue</h1>
+          <p>
+            Open the private viewer link from your Mac, or scan its QR code.
+          </p>
+        </div>
       </main>
     );
   }
@@ -395,16 +398,14 @@ const App = () => {
     index === -1 ? "Ready" : `${index + 1} / ${state.answers.length}`;
   const answerHeading = busy
     ? "Preparing your answer…"
-    : "Press Space for an answer.";
+    : "Press Space to request an answer.";
   const readingStyle: CSSProperties & { "--reading-size": string } = {
     "--reading-size": `${state.fontSize / 16}rem`,
   };
   return (
     <main className="viewer" style={readingStyle}>
       <div className="meta">
-        <span className="position">
-          {state.mode === "transcript" ? "Transcript preview" : answerPosition}
-        </span>
+        <span className="position">{answerPosition}</span>
         <output className="status">
           <i className={status === "Listening" ? "live" : ""} />
           {shownStatus}
@@ -415,100 +416,61 @@ const App = () => {
         ref={pane}
         onScroll={save}
         tabIndex={0}
-        aria-label={state.mode === "transcript" ? "Live transcript" : "Answer"}
+        aria-label="Answer"
       >
         {state.error && (
           <p className="error" role="alert" data-anchor="error">
             {failure}
           </p>
         )}
-        {state.mode === "transcript" ? (
-          <article className="transcript">
-            {!state.transcript.length && (
-              <div className="empty">
-                <h1 data-anchor="empty-heading">
-                  {sessionEnded
-                    ? "Session ended."
-                    : "Listening to both sources."}
-                </h1>
-                <p data-anchor="empty-guide">
-                  {sessionEnded
-                    ? restartGuide
-                    : "Speech will appear here. Choose Answers in Settings before your next session."}
-                </p>
-              </div>
-            )}
-            {state.transcript.map((line) => (
-              <section key={line.id} data-anchor={line.id}>
-                <div className="speaker">
-                  {line.source === "computer" ? "Computer" : "Microphone"}
-                  <time>
-                    {Math.floor(line.start / 60)}:
-                    {String(Math.floor(line.start % 60)).padStart(2, "0")}
-                  </time>
-                </div>
-                <p>{line.text}</p>
-              </section>
-            ))}
-          </article>
-        ) : (
-          <article
-            className="answer"
-            lang={answerLanguage?.tag}
-            aria-busy={busy}
-          >
-            {card !== undefined && card.text !== "" ? (
-              <Answer text={card.text} />
-            ) : (
-              <div className="empty" lang="en">
-                <h1 data-anchor="empty-heading">
-                  {sessionEnded ? "Session ended." : answerHeading}
-                </h1>
-                <p data-anchor="empty-guide">
-                  {sessionEnded && restartGuide}
-                  {!sessionEnded &&
-                    busy &&
-                    "Keep listening. Your answer will appear here."}
-                  {!sessionEnded && !busy && (
-                    <>
-                      Hold <kbd>{state.modifiers}</kbd> and press{" "}
-                      <kbd>Space</kbd> on your Mac.
-                    </>
-                  )}
-                </p>
-              </div>
-            )}
-            {card?.status === "incomplete" && (
-              <p className="note" lang="en" data-anchor="answer-note">
-                Incomplete answer
+        <article className="answer" lang={answerLanguage?.tag} aria-busy={busy}>
+          {card !== undefined && card.text !== "" ? (
+            <Answer text={card.text} />
+          ) : (
+            <div className="empty" lang="en">
+              <h1 data-anchor="empty-heading">
+                {sessionEnded ? "Session ended." : answerHeading}
+              </h1>
+              <p data-anchor="empty-guide">
+                {sessionEnded && restartGuide}
+                {!sessionEnded &&
+                  busy &&
+                  "Keep listening. Your answer will appear here."}
+                {!sessionEnded && !busy && (
+                  <>
+                    Hold <kbd>{state.modifiers}</kbd> and press <kbd>Space</kbd>{" "}
+                    on your Mac.
+                  </>
+                )}
               </p>
-            )}
-            {card?.status === "failed" && !state.error && (
-              <p className="error" lang="en" data-anchor="error">
-                {failure}
-              </p>
-            )}
-          </article>
-        )}
+            </div>
+          )}
+          {card?.status === "incomplete" && (
+            <p className="error" lang="en" data-anchor="answer-note">
+              Incomplete answer
+            </p>
+          )}
+          {card?.status === "failed" && !state.error && (
+            <p className="error" lang="en" data-anchor="error">
+              {failure}
+            </p>
+          )}
+        </article>
       </section>
       {!sessionEnded && (
         <footer className="hints">
           <span>
             Hold <kbd>{state.modifiers}</kbd>
           </span>
-          {state.mode === "answer" && (
-            <span>
-              <kbd>Space</kbd> answer
-            </span>
-          )}
+          <span>
+            <kbd>Space</kbd> request answer
+          </span>
           <span>
             <kbd>↑↓</kbd> read
           </span>
-          {state.mode === "answer" && (
-            <span>
-              <kbd>←→</kbd> history
-            </span>
-          )}
+          <span>
+            <kbd>←→</kbd> history
+          </span>
           <span>
             <kbd>+/−</kbd> text size
           </span>

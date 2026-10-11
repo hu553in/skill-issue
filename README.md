@@ -1,4 +1,4 @@
-# Skill Issue
+# Skill Issue 🐢
 
 [![CI](https://github.com/hu553in/skill-issue/actions/workflows/ci.yml/badge.svg)](https://github.com/hu553in/skill-issue/actions/workflows/ci.yml)
 
@@ -7,7 +7,10 @@ locally. On request, it uses your ChatGPT subscription to answer the current que
 from the main display. Read answers on your phone through an encrypted web viewer and control it
 from your Mac.
 
-[Install](#install) | [Viewer server](#viewer-server) | [Usage](#usage) |
+Skill Issue is deliberately opinionated and simple, with a small set of controls and predictable
+defaults to keep it **easy to use under interview stress**.
+
+[Install](#install) | [Viewer endpoint](#viewer-endpoint) | [Usage](#usage) |
 [Data and privacy](#data-and-privacy) | [Development](#development)
 
 ## Install
@@ -33,7 +36,7 @@ xattr -dr com.apple.quarantine "/Applications/Skill Issue.app"
 
 This removes only the quarantine attribute and preserves other extended attributes.
 
-## Viewer server
+## Viewer endpoint
 
 To read answers on your phone, deploy the viewer and relay to your own Cloudflare account. Its usage
 limits and billing apply. The server needs no ChatGPT credentials, tunnels or open ports on your
@@ -57,14 +60,14 @@ Use these build settings:
 | ---------------------------- | ------------------------------------------------------------- |
 | Root directory               | Repository root                                               |
 | Build command                | Leave empty                                                   |
-| Deploy command               | `bun run deploy`                                              |
+| Deploy command               | `bun deploy`                                                  |
 | Preview builds               | Disabled                                                      |
 | Preview command              | `true` if the dashboard requires a value                      |
 | Build variable `BUN_VERSION` | The version after `bun@` in `package.json`'s `packageManager` |
 
-`bun run deploy` builds the web assets before publishing the Worker. Clear the automatically
-detected Build command because `build` also compiles the macOS app and requires Xcode. Keep preview
-builds disabled; `true` exits without deploying. See Cloudflare's
+`bun deploy` builds the web assets before publishing the Worker. Clear the automatically detected
+Build command because `build` also compiles the macOS app and requires Xcode. Keep preview builds
+disabled; `true` exits without deploying. See Cloudflare's
 [build settings](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/).
 
 ### Deploy from a checkout
@@ -74,14 +77,13 @@ With [Bun](https://bun.sh) installed at the version declared in `package.json`, 
 ```sh
 bun install --frozen-lockfile
 bunx wrangler login
-bun run deploy
+bun deploy
 ```
 
 ## Usage
 
-1. Open Settings, sign in with ChatGPT, choose your microphone and answer language, and leave
-   **Viewer** on **Answers**.
-2. Set **Viewer server** to your Worker's HTTPS URL from the Cloudflare dashboard or terminal
+1. Open Settings, sign in with ChatGPT, and choose your microphone and answer language.
+2. Set **Viewer endpoint** to your Worker's HTTPS URL from the Cloudflare dashboard or terminal
    output. The default `http://127.0.0.1:8787` works only on this Mac and is intended for
    [local development](#run-locally).
 3. Start a session and allow microphone and screen/system audio access. On first use, the app
@@ -89,9 +91,18 @@ bun run deploy
 4. Open the session link on your phone or scan its QR code. Keep the browser in the foreground and
    the phone unlocked; Screen Wake Lock is best effort.
 
-Settings are locked while listening. Answer language defaults to English and is independent of
-speech recognition. **Transcript preview** is a diagnostic mode; select it before starting a
-session.
+Setup fields are locked while listening. Answer language defaults to English and is independent of
+speech recognition.
+
+**Model** and **Reasoning effort** load from your ChatGPT account after sign-in. The default model
+is `gpt-6-luna`, or the first available model; effort defaults to `low`, or the first supported
+level. Choices are saved between launches. Changing the model resets effort to its default. Both
+selectors stay disabled until choices load; if the catalog supplies no supported effort levels, the
+effort selector stays disabled and the app omits that parameter from requests.
+
+The status badge is beside the app title; errors appear below it. A failed model-catalog load offers
+**Retry** there. **Quit** and **Command + Q** ask for confirmation before stopping the session and
+closing the app. **Cancel** keeps the app and session running.
 
 ### Keyboard shortcuts
 
@@ -99,7 +110,7 @@ Hold **Control + Option + Command** for all commands:
 
 | Key   | Action                                                       |
 | ----- | ------------------------------------------------------------ |
-| Space | Answer the current question                                  |
+| Space | Request an answer to the current question                    |
 | ↑ / ↓ | Scroll by half the viewer's visible height                   |
 | ← / → | Previous / next answer, restoring its reading position       |
 | + / − | Increase / decrease text size, keeping your reading position |
@@ -154,28 +165,28 @@ bun setup:swift
 Start the local viewer server:
 
 ```sh
-bun run dev
+bun dev
 ```
 
 In another terminal, build and launch the app:
 
 ```sh
-bun run run:swift
+bun run:swift
 ```
 
-Use `http://127.0.0.1:8787` as **Viewer server**. The launch command waits for a running session to
-stop before replacing its debug bundle. For VS Code debugging, select **Attach to Skill Issue** and
-choose the running `SkillIssue` process.
+Use `http://127.0.0.1:8787` as **Viewer endpoint**. The launch command waits for a running session
+to stop before replacing its debug bundle. For VS Code debugging, select **Attach to Skill Issue**
+and choose the running `SkillIssue` process.
 
 ### Build and package
 
 ```sh
-bun run build:release
+bun build:release
 ```
 
 This creates `dist/release/Skill Issue.app` and `dist/Skill-Issue-macos-arm64.zip`. CI runs the same
 command as part of the Swift checks and uploads the ZIP after they pass. For a debug bundle, use
-`bun run build:swift`; its output is `dist/debug/Skill Issue.app`. Both packaging commands include
+`bun build:swift`; its output is `dist/debug/Skill Issue.app`. Both packaging commands include
 dependency license notices and do not launch the app.
 
 ### Checks
@@ -219,8 +230,8 @@ dependencies, JOSESwift and GitHub Actions.
 To inspect app output or unified system logs, run one of these commands:
 
 ```sh
-bun run run:swift --logs
-bun run run:swift --telemetry
+bun run:swift --logs
+bun run:swift --telemetry
 ```
 
 Both rebuild and relaunch the debug app. `--logs` follows stdout/stderr in `dist/app.log`;
