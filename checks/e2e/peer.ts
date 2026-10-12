@@ -1,3 +1,5 @@
+import { WebSocket } from "ws";
+
 import type { Packet } from "../../protocol";
 
 type Message =
@@ -8,19 +10,12 @@ type Message =
   | { type: "offline" }
   | { type: "ended" };
 type TypedMessage<T extends Message["type"]> = Extract<Message, { type: T }>;
-// Bun and Node accept handshake headers; lib.dom only declares browser overloads.
-const Socket = WebSocket as typeof WebSocket & {
-  new (
-    endpoint: string,
-    options: { protocols: string[]; headers: Record<string, string> }
-  ): WebSocket;
-};
-
 export class Peer {
   readonly socket: WebSocket;
-  readonly closed: Promise<CloseEvent>;
+  readonly closed: Promise<WebSocket.CloseEvent>;
   private readonly messages: Message[] = [];
   private readonly waiting = new Set<() => void>();
+  private failure: Error | undefined;
 
   constructor(
     endpoint: string,
@@ -28,24 +23,40 @@ export class Peer {
     token: string,
     clientIP?: string
   ) {
-    this.socket = new Socket(endpoint, {
-      headers: clientIP === undefined ? {} : { "CF-Connecting-IP": clientIP },
-      protocols: ["skill-issue", `skill-issue.${role}.${token}`],
-    });
-    const closed = Promise.withResolvers<CloseEvent>();
+    this.socket = new WebSocket(
+      endpoint,
+      ["skill-issue", `skill-issue.${role}.${token}`],
+      {
+        headers: clientIP === undefined ? {} : { "CF-Connecting-IP": clientIP },
+      }
+    );
+    const closed = Promise.withResolvers<WebSocket.CloseEvent>();
     this.closed = closed.promise;
-    this.socket.addEventListener("close", closed.resolve, { once: true });
+    this.socket.addEventListener(
+      "close",
+      (event) => {
+        closed.resolve(event);
+        this.notify();
+      },
+      { once: true }
+    );
     this.socket.addEventListener("message", (event) => {
-      this.messages.push(JSON.parse(String(event.data)) as Message);
-      for (const notify of this.waiting) {
-        notify();
+      if (typeof event.data !== "string") {
+        throw new TypeError("Expected a text WebSocket packet");
       }
+      this.messages.push(JSON.parse(event.data) as Message);
+      this.notify();
     });
-    this.socket.addEventListener("close", () => {
-      for (const notify of this.waiting) {
-        notify();
-      }
+    this.socket.on("error", (error) => {
+      this.failure = error;
+      this.notify();
     });
+  }
+
+  private notify() {
+    for (const notify of this.waiting) {
+      notify();
+    }
   }
 
   send(message: unknown) {
@@ -64,6 +75,8 @@ export class Peer {
       if (index !== -1) {
         this.waiting.delete(check);
         pending.resolve(this.messages.splice(index, 1)[0] as TypedMessage<T>);
+      } else if (this.failure !== undefined) {
+        pending.reject(this.failure);
       } else if (this.socket.readyState === WebSocket.CLOSED) {
         pending.reject(new Error(`Socket closed before ${type}`));
       }

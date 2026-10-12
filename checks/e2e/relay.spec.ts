@@ -51,10 +51,9 @@ test("queued snapshot packets are delivered once and in order", async ({
   const { peer } = await relay.connect("reader");
   const first = peer.next("state");
   for (const seq of [1, 2]) {
-    peer.socket.dispatchEvent(
-      new MessageEvent("message", {
-        data: JSON.stringify({ box: "probe", seq, type: "state" }),
-      })
+    peer.socket.emit(
+      "message",
+      JSON.stringify({ box: "probe", seq, type: "state" })
     );
   }
   const firstPacket = await first;
