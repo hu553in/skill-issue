@@ -80,6 +80,9 @@ bunx wrangler login
 bun deploy
 ```
 
+Update the app and Worker together; mixed old and new versions are not supported. Start a new
+session after updating both.
+
 ## Usage
 
 1. Open Settings, sign in with ChatGPT, and choose your microphone and answer language.
@@ -91,8 +94,8 @@ bun deploy
 4. Open the session link on your phone or scan its QR code. Keep the browser in the foreground and
    the phone unlocked; Screen Wake Lock is best effort.
 
-Setup fields are locked while listening. Answer language defaults to English and is independent of
-speech recognition.
+Microphone, answer language and viewer endpoint are locked while listening. Answer language defaults
+to English and is independent of speech recognition.
 
 **Model** and **Reasoning effort** load from your ChatGPT account after sign-in. The default model
 is `gpt-6-luna`, or the first available model; effort defaults to `low`, or the first supported
@@ -100,9 +103,40 @@ level. Choices are saved between launches. Changing the model resets effort to i
 selectors stay disabled until choices load; if the catalog supplies no supported effort levels, the
 effort selector stays disabled and the app omits that parameter from requests.
 
-The status badge is beside the app title; errors appear below it. A failed model-catalog load offers
-**Retry** there. **Quit** and **Command + Q** ask for confirmation before stopping the session and
-closing the app. **Cancel** keeps the app and session running.
+If saved accounts cannot be read from Keychain, choose **Retry** before signing in; the app keeps
+the saved registrations untouched.
+
+If credentials cannot be saved to Keychain, restore Keychain access and choose **Retry**. The
+current session and answers stay available; Retry saves the credentials without requesting another
+answer. If you quit before saving succeeds, you may need to sign in again.
+
+If sign-in succeeds without permission to use your plan, choose **Enable ChatGPT plan usage**. After
+**Sign out**, saved accounts remain available for repeat sign-in. Select a saved **Account** and
+choose **Sign in** to reuse its registration, or select **Another account** to sign in with a
+different account and save its registration. Without saved accounts, choose **Sign in with
+ChatGPT**. Sign-out removes local tokens. If OpenAI cannot confirm remote revocation, the app shows
+a warning and **Open ChatGPT**. To disconnect it, open **Settings > Security and login > Sign in
+with ChatGPT > Skill Issue > Disconnect**.
+
+Selecting an account does not start sign-in. The badge shows **Signed out** until you sign in, and
+**Ready** when you can start a session. While an operation runs, it names the operation.
+**Thinking** follows the current request even when you read an earlier answer. Viewer connection
+counts stay separate from control synchronization.
+
+The status badge is beside the app title; errors appear below it with an action when available.
+Temporary failures offer **Retry** or **Request answer**. Usage limits offer **View usage**: check
+your app and plan limits before requesting another answer with the button or shortcut. Requests
+never retry automatically. Existing answers and captured context stay available during recovery. You
+can change the model and reasoning effort between requests without restarting the session; both
+selectors stay disabled while an answer is being prepared or generated. If authorization expires
+while listening, stop the session before signing in again. A new session clears its predecessor's
+answers and captured context.
+
+If a usage limit prevents loading models, choose **View usage** to check your limits, then **Retry**
+to reload the catalog.
+
+**Quit** and **Command + Q** ask for confirmation before stopping the session and closing the app.
+**Cancel** keeps the app and session running.
 
 ### Keyboard shortcuts
 
@@ -120,14 +154,17 @@ The viewer shows one answer at a time. Streaming and reconnects preserve your se
 reading position. Pressing Space again cancels the current generation and captures fresh context;
 its partial answer remains in history. Holding Space does not repeat requests.
 
+The viewer reconnects automatically after temporary interruptions. If it cannot connect or reports
+that the connection stopped, reload it or reopen its current link from Skill Issue on your Mac.
+
 Text size starts at 20, changes by 2 between 16 and 40, and is saved across app restarts. The +/=
 key works with or without Shift. H hides only this app's icon; macOS capture indicators remain
 visible. Reopen the app to show Settings if its icon is hidden.
 
 ## Data and privacy
 
-- ChatGPT credentials stay in the Mac's Keychain. Requests go directly to OpenAI using your
-  subscription with `store: false`. Model availability and limits depend on
+- ChatGPT tokens and verified account registrations stay in the Mac's Keychain. Requests go directly
+  to OpenAI using your subscription with `store: false`. Model availability and limits depend on
   [Sign in with ChatGPT](https://developers.openai.com/siwc/token-sharing-open-source).
 - Each answer request captures a screenshot and finalizes a batch of captured audio. Chronological
   transcripts, screenshots and earlier AI suggestions form the request history. Viewing an old

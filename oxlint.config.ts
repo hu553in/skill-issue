@@ -46,7 +46,11 @@ export default defineConfig({
       },
     },
     {
-      files: ["checks/protocol.test.ts", "checks/worker.test.ts"],
+      files: [
+        "checks/protocol.test.ts",
+        "checks/room.test.ts",
+        "checks/worker.test.ts",
+      ],
       rules: {
         // In-memory fixtures implement async platform APIs without I/O.
         "require-await": "off",
@@ -55,6 +59,7 @@ export default defineConfig({
     {
       files: [
         "checks/protocol.test.ts",
+        "checks/room.test.ts",
         "checks/worker.test.ts",
         "checks/relay.ts",
         "checks/e2e/native.spec.ts",

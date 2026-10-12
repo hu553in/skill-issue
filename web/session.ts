@@ -10,6 +10,7 @@ import {
 
 export const empty: ViewState = {
   answers: [],
+  canAnswer: false,
   error: "",
   fontSize: 20,
   language: "English",
@@ -18,7 +19,7 @@ export const empty: ViewState = {
   selection: 0,
   version: 1,
 };
-export const failure = "Couldn't complete that. Try again.";
+export const failure = "Couldn't complete that.";
 export const unbase64 = (text: string) =>
   Uint8Array.from(atob(text.replaceAll("-", "+").replaceAll("_", "/")), (c) =>
     // atob produces bytes, so each character is exactly one UTF-16 code unit.

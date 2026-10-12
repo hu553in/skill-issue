@@ -28,92 +28,113 @@ private struct ResponseByteChunks: AsyncSequence, Sendable {
     }
 }
 
-struct Credentials: Codable, Sendable {
-    var clientID: String
-    var subject: String
-    var email: String
-    var idToken: String
-    var accessToken: String
-    var refreshToken: String
-    var expires: Date
-}
-
-struct CredentialStorage: Sendable {
-    var load: @Sendable () throws -> Credentials?
-    var save: @Sendable (Credentials) throws -> Void
-    var delete: @Sendable () throws -> Void
-
-    private static func query() -> [String: Any] {
-        [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "com.github.hu553in.skill-issue",
-            kSecAttrAccount as String: "chatgpt",
-        ]
-    }
-    static let keychain = Self(
-        load: {
-            var result: CFTypeRef?
-            let status = SecItemCopyMatching(
-                query().merging([
-                    kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitOne,
-                ]) { _, new in new } as CFDictionary, &result)
-            if status == errSecItemNotFound { return nil }
-            guard status == errSecSuccess, let data = result as? Data else {
-                throw AppFailure.failed
-            }
-            return try JSONDecoder().decode(Credentials.self, from: data)
-        },
-        save: { value in
-            let attributes: [String: Any] = [
-                kSecValueData as String: try JSONEncoder().encode(value)
-            ]
-            var status = SecItemUpdate(query() as CFDictionary, attributes as CFDictionary)
-            if status == errSecItemNotFound {
-                status = SecItemAdd(
-                    query().merging(attributes) { _, new in new }.merging([
-                        kSecAttrAccessible as String:
-                            kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-                    ]) { _, new in new } as CFDictionary, nil)
-            }
-            guard status == errSecSuccess else { throw AppFailure.failed }
-        },
-        delete: {
-            let status = SecItemDelete(query() as CFDictionary)
-            guard status == errSecSuccess || status == errSecItemNotFound else {
-                throw AppFailure.failed
-            }
-        })
-}
-
 @MainActor
 final class ChatGPT {
-    private(set) var credentials: Credentials?
+    private var accounts = ChatGPTAccounts()
+    private var accountsNeedSaving = false
+    private(set) var accountsRestored = false
+    private(set) var requiresSignIn = false
+    var accountStateChanged: ((ChatGPTFailure?) -> Void)?
+    var account: ChatGPTAccount? { accounts.selected }
+    var registrations: [ChatGPTAccount] { accounts.accounts }
+    var isSignedIn: Bool { accountsRestored && account?.session != nil }
+    var canUsePlan: Bool { accountsRestored && account?.session?.canUsePlan == true }
     private let resource = "https://api.openai.com/v1"
     private let session: URLSession
-    private let storage: CredentialStorage
+    private let storage: AccountStorage
     private let defaults: UserDefaults
+    private let openAuthorization: (URL) -> Bool
     private var discovery: [String: Any]?
     private var refreshTask: Task<String, Error>?
-    private var sessionConfiguration: (model: String, effort: String?)?
     private var signingOut = false
 
     init(
-        session: URLSession = .shared, storage: CredentialStorage = .keychain,
-        defaults: UserDefaults = .standard
+        session: URLSession = .shared, storage: AccountStorage = .keychain,
+        defaults: UserDefaults = .standard,
+        openAuthorization: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) }
     ) {
         self.session = session
         self.storage = storage
         self.defaults = defaults
+        self.openAuthorization = openAuthorization
     }
 
     func restore() async throws {
         let storage = storage
-        credentials = try await Task.detached { try storage.load() }.value
+        accountsRestored = false
+        requiresSignIn = false
+        do {
+            accounts = try await Task.detached { try storage.load() }.value ?? ChatGPTAccounts()
+        } catch {
+            throw ChatGPTFailure.accountStorageUnavailable
+        }
+        accountsRestored = true
+        accountsNeedSaving = false
+        accountStateChanged?(nil)
+        // A bare issued ID from older versions was not bound to a verified identity.
+        defaults.removeObject(forKey: "issuedClientID")
     }
 
-    private func save(_ value: Credentials) throws {
-        try storage.save(value)
-        credentials = value
+    private func requireRestoredAccounts() throws {
+        guard accountsRestored else { throw ChatGPTFailure.accountStorageUnavailable }
+    }
+
+    private func save(_ value: ChatGPTAccount) throws {
+        try requireRestoredAccounts()
+        var next = accounts
+        if let index = next.accounts.firstIndex(where: { $0.clientID == value.clientID }) {
+            next.accounts[index] = value
+        } else {
+            next.accounts.append(value)
+        }
+        next.selectedClientID = value.clientID
+        accounts = next
+        accountsNeedSaving = true
+        try savePendingAccounts()
+        accountStateChanged?(nil)
+    }
+
+    func savePendingAccounts() throws {
+        try requireRestoredAccounts()
+        guard accountsNeedSaving else { return }
+        do {
+            try storage.save(accounts)
+            accountsNeedSaving = false
+        } catch {
+            accountStateChanged?(.credentialsNotSaved)
+            throw ChatGPTFailure.credentialsNotSaved
+        }
+    }
+
+    func selectAccount(clientID: String?) throws {
+        try requireRestoredAccounts()
+        guard !signingOut, !isSignedIn,
+            clientID == nil || accounts.accounts.contains(where: { $0.clientID == clientID })
+        else { throw AppFailure.failed }
+        var next = accounts
+        next.selectedClientID = clientID
+        try storage.save(next)
+        accounts = next
+        accountsNeedSaving = false
+        requiresSignIn = false
+        accountStateChanged?(nil)
+    }
+
+    private func clearSession(failure: ChatGPTFailure? = nil) throws {
+        try requireRestoredAccounts()
+        guard let index = accounts.accounts.firstIndex(where: { $0.clientID == account?.clientID })
+        else { return }
+        // Known unusable tokens must stop being used even if Keychain refuses the write.
+        accounts.accounts[index].session = nil
+        accounts.accounts[index].pendingSession = nil
+        requiresSignIn = false
+        accountsNeedSaving = true
+        do { try storage.save(accounts) } catch {
+            accountStateChanged?(.tokenRemovalFailed)
+            throw ChatGPTFailure.tokenRemovalFailed
+        }
+        accountsNeedSaving = false
+        accountStateChanged?(failure)
     }
 
     private func configuration() async throws -> [String: Any] {
@@ -128,8 +149,10 @@ final class ChatGPT {
         return value
     }
 
-    func signIn() async throws {
+    func signIn(requestPlanConsent: Bool = false) async throws {
+        try requireRestoredAccounts()
         guard !signingOut else { throw AppFailure.failed }
+        let expectedAccount = account
         let server = try CallbackServer()
         defer { server.stop() }
         let redirect = try await server.start()
@@ -138,7 +161,7 @@ final class ChatGPT {
         let verifier = Data.random().base64URLEncodedString()
         let host = defaults.string(forKey: "hostID") ?? "urn:uuid:\(UUID().uuidString.lowercased())"
         defaults.set(host, forKey: "hostID")
-        let existingClient = credentials?.clientID ?? defaults.string(forKey: "issuedClientID")
+        let existingClient = expectedAccount?.clientID
         var parameters = [
             "client_id": existingClient ?? "dynamic_agent_client", "ext_agent_host_id": host,
             "response_type": "code", "redirect_uri": redirect,
@@ -148,34 +171,50 @@ final class ChatGPT {
             "code_challenge": Data(SHA256.hash(data: Data(verifier.utf8))).base64URLEncodedString(),
         ]
         if existingClient == nil { parameters["agent_name_hint"] = "Skill Issue" }
-        if let credentials { parameters["id_token_hint"] = credentials.idToken }
+        if let identity = expectedAccount?.session?.idToken {
+            parameters["id_token_hint"] = identity
+        }
+        if requestPlanConsent { parameters["prompt"] = "consent" }
         var authorize = URLComponents(string: "https://auth.openai.com/api/accounts/authorize")!
         authorize.queryItems = parameters.map { URLQueryItem(name: $0.key, value: $0.value) }
-        guard let url = authorize.url, NSWorkspace.shared.open(url) else { throw AppFailure.failed }
+        guard let url = authorize.url, openAuthorization(url) else { throw AppFailure.failed }
         let callback = try await server.callback()
         guard callback["state"] == state, callback["error"] == nil, let code = callback["code"]
         else { throw AppFailure.failed }
         let client = callback["client_id"] ?? existingClient
-        guard let client, client != "dynamic_agent_client",
+        guard let client, !client.isEmpty, client != "dynamic_agent_client",
             existingClient == nil || existingClient == client
         else { throw AppFailure.failed }
-        defaults.set(client, forKey: "issuedClientID")
-        let tokens = try await tokenRequest([
-            "grant_type": "authorization_code", "client_id": client, "code": code,
-            "code_verifier": verifier, "redirect_uri": redirect, "resource": resource,
-        ])
+        let tokens: [String: Any]
+        do {
+            tokens = try await tokenRequest([
+                "grant_type": "authorization_code", "client_id": client, "code": code,
+                "code_verifier": verifier, "redirect_uri": redirect, "resource": resource,
+            ])
+        } catch let failure as ChatGPTFailure where failure.isTerminalRefresh {
+            // A rejected authorization code does not invalidate the saved session.
+            throw failure.authorizationCodeFailure(requestPlanConsent: requestPlanConsent)
+        }
         guard let idToken = tokens["id_token"] as? String else { throw AppFailure.failed }
-        let claims = try await identity(idToken, client: client, nonce: nonce)
+        let claims: [String: Any]
+        do {
+            claims = try await identity(idToken, client: client, nonce: nonce)
+        } catch let failure as ChatGPTFailure where failure.recovery == .signIn {
+            throw failure.authorizationCodeFailure(requestPlanConsent: requestPlanConsent)
+        }
         guard let subject = claims["sub"] as? String, !subject.isEmpty,
-            credentials == nil || credentials?.subject == subject
-        else { throw AppFailure.failed }
-        let next = try credential(
-            tokens, client: client, subject: subject,
-            email: claims["email"] as? String ?? "Connected", idToken: idToken)
-        try save(next)
+            expectedAccount == nil || expectedAccount?.subject == subject,
+            !accounts.accounts.contains(where: { $0.clientID == client && $0.subject != subject })
+        else { throw ChatGPTFailure.wrongAccount }
+        let next = try grant(tokens, idToken: idToken)
+        requiresSignIn = false
+        try save(
+            ChatGPTAccount(
+                clientID: client, subject: subject,
+                email: claims["email"] as? String ?? "Connected", session: next))
     }
 
-    private func identity(_ token: String, client: String, nonce: String) async throws -> [String:
+    private func identity(_ token: String, client: String, nonce: String?) async throws -> [String:
         Any]
     {
         let jws = try JWS(compactSerialization: token)
@@ -202,28 +241,40 @@ final class ChatGPT {
         let payload = try jws.validate(using: verifier).payload.data()
         guard let claims = try JSONSerialization.jsonObject(with: payload) as? [String: Any],
             claims["iss"] as? String == "https://auth.openai.com",
-            claims["nonce"] as? String == nonce, let exp = claims["exp"] as? Double,
-            let iat = claims["iat"] as? Double, exp > Date().timeIntervalSince1970 - 5,
+            nonce == nil || claims["nonce"] as? String == nonce, let exp = claims["exp"] as? Double,
+            let iat = claims["iat"] as? Double,
             iat <= Date().timeIntervalSince1970 + 5
         else { throw AppFailure.failed }
         let audiences = (claims["aud"] as? [String]) ?? [claims["aud"] as? String ?? ""]
         guard audiences.contains(client), audiences.count == 1 || claims["azp"] as? String == client
         else { throw AppFailure.failed }
+        guard exp > Date().timeIntervalSince1970 - 5 else { throw ChatGPTFailure.signInRequired }
         return claims
     }
 
-    private func credential(
-        _ tokens: [String: Any], client: String, subject: String, email: String, idToken: String
-    ) throws -> Credentials {
-        guard let access = tokens["access_token"] as? String,
-            let refresh = tokens["refresh_token"] as? String,
-            let expiry = tokens["expires_in"] as? Double, let scope = tokens["scope"] as? String,
-            scope.split(separator: " ").contains("chatgpt.tokens.use.direct"),
-            (tokens["token_type"] as? String)?.lowercased() == "bearer"
-        else { throw AppFailure.failed }
-        return Credentials(
-            clientID: client, subject: subject, email: email, idToken: idToken, accessToken: access,
-            refreshToken: refresh, expires: Date().addingTimeInterval(expiry))
+    private func grant(
+        _ tokens: [String: Any], idToken: String, previousScopes: [String]? = nil
+    ) throws -> ChatGPTSession {
+        let scopes: [String]
+        if let value = tokens["scope"] {
+            guard let scope = value as? String else { throw AppFailure.failed }
+            scopes = scope.split(separator: " ").map(String.init)
+        } else {
+            guard let previousScopes else { throw AppFailure.failed }
+            scopes = previousScopes
+        }
+        let access = tokens["access_token"] as? String
+        let refresh = tokens["refresh_token"] as? String
+        let expiry = tokens["expires_in"] as? Double
+        if scopes.contains("chatgpt.tokens.use.direct") {
+            guard let access, !access.isEmpty, let refresh, !refresh.isEmpty,
+                let expiry, expiry.isFinite, expiry > 0,
+                (tokens["token_type"] as? String)?.lowercased() == "bearer"
+            else { throw AppFailure.failed }
+        }
+        return ChatGPTSession(
+            idToken: idToken, accessToken: access, refreshToken: refresh,
+            expires: expiry.map { Date().addingTimeInterval($0) }, scopes: scopes)
     }
 
     private func tokenRequest(_ values: [String: String]) async throws -> [String: Any] {
@@ -236,31 +287,79 @@ final class ChatGPT {
     }
 
     private func accessToken() async throws -> String {
+        try requireRestoredAccounts()
         guard !signingOut else { throw AppFailure.failed }
+        guard !requiresSignIn else { throw ChatGPTFailure.signInRequired }
         if let refreshTask {
             let token = try await refreshTask.value
-            guard !signingOut, credentials?.accessToken == token else { throw AppFailure.failed }
+            guard !signingOut, account?.session?.accessToken == token else {
+                throw AppFailure.failed
+            }
             return token
         }
-        guard let current = credentials else { throw AppFailure.failed }
-        if current.expires >= Date().addingTimeInterval(60) { return current.accessToken }
+        try savePendingAccounts()
+        guard let current = account, let grant = current.session else {
+            throw ChatGPTFailure.signInRequired
+        }
+        guard grant.canUsePlan else { throw ChatGPTFailure.planDisabled }
+        guard let access = grant.accessToken, grant.refreshToken != nil,
+            let expires = grant.expires
+        else { throw AppFailure.failed }
+        if current.pendingSession == nil, expires >= Date().addingTimeInterval(60) { return access }
+        let renewable = current.pendingSession ?? grant
+        let needsRefresh =
+            current.pendingSession == nil
+            || renewable.expires.map { $0 < Date().addingTimeInterval(60) } == true
         // Refresh tokens rotate. Cancellation of an answer must not start two
         // refreshes or discard the replacement token before it reaches Keychain.
         let task = Task { [self] in
-            let result = try await tokenRequest([
-                "grant_type": "refresh_token", "client_id": current.clientID,
-                "refresh_token": current.refreshToken, "resource": resource,
-            ])
-            let next = try credential(
-                result, client: current.clientID, subject: current.subject, email: current.email,
-                idToken: result["id_token"] as? String ?? current.idToken)
-            try save(next)
-            return next.accessToken
+            var refreshed = current
+            if needsRefresh {
+                guard let refresh = renewable.refreshToken else { throw AppFailure.failed }
+                let result: [String: Any]
+                do {
+                    result = try await tokenRequest([
+                        "grant_type": "refresh_token", "client_id": current.clientID,
+                        "refresh_token": refresh, "resource": resource,
+                    ])
+                } catch let failure as ChatGPTFailure where failure.isTerminalRefresh {
+                    try clearSession(failure: failure)
+                    throw failure
+                }
+                refreshed.pendingSession = try self.grant(
+                    result, idToken: result["id_token"] as? String ?? renewable.idToken,
+                    previousScopes: renewable.scopes)
+            }
+            guard let next = refreshed.pendingSession else { throw AppFailure.failed }
+            if next.idToken != grant.idToken {
+                if needsRefresh {
+                    // Persist rotation separately from the verified session. A key-fetch
+                    // outage or app restart must not reuse the consumed refresh token.
+                    try save(refreshed)
+                }
+                let claims: [String: Any]
+                do {
+                    claims = try await identity(next.idToken, client: current.clientID, nonce: nil)
+                } catch let failure as ChatGPTFailure where failure.recovery == .signIn {
+                    requiresSignIn = true
+                    accountStateChanged?(failure)
+                    throw failure
+                }
+                guard claims["sub"] as? String == current.subject else { throw AppFailure.failed }
+            }
+            refreshed.session = next
+            refreshed.pendingSession = nil
+            try save(refreshed)
+            guard next.canUsePlan, let token = next.accessToken else {
+                throw ChatGPTFailure.planDisabled
+            }
+            guard next.expires.map({ $0 > Date() }) == true else { throw ChatGPTFailure.generic }
+            return token
         }
         refreshTask = task
         defer { refreshTask = nil }
         let token = try await task.value
-        guard !signingOut, credentials?.accessToken == token else { throw AppFailure.failed }
+        guard !signingOut, account?.session?.accessToken == token else { throw AppFailure.failed }
         return token
     }
 
@@ -280,113 +379,189 @@ final class ChatGPT {
     }
 
     func prepareSession(model: ChatGPTModel, effort: String) async throws {
-        sessionConfiguration = nil
-        guard model.efforts.isEmpty ? effort.isEmpty : model.efforts.contains(effort) else {
+        guard model.supportsEffort(effort) else {
             throw AppFailure.failed
         }
         _ = try await accessToken()
         try Task.checkCancellation()
-        sessionConfiguration = (model.slug, effort.isEmpty ? nil : effort)
     }
 
     func finishPendingRefresh() async {
         _ = try? await refreshTask?.value
     }
 
-    func signOut() async throws {
+    func signOut() async throws -> Bool {
+        try requireRestoredAccounts()
         guard !signingOut else { throw AppFailure.failed }
         signingOut = true
         defer { signingOut = false }
-        // A rotating refresh must finish before deleting its replacement grant.
+        // Wait for rotation and revoke while the latest grant is still available.
         await finishPendingRefresh()
-        let old = credentials
-        try storage.delete()
-        credentials = nil
-        sessionConfiguration = nil
-        defaults.removeObject(forKey: "issuedClientID")
-        if let old {
-            let config = try await configuration()
-            guard let endpoint = config["revocation_endpoint"] as? String,
-                let url = URL(string: endpoint), url.scheme == "https",
-                url.host == "auth.openai.com"
-            else { throw AppFailure.failed }
-            var request = URLRequest(url: url)
+        guard let old = account, let grant = old.pendingSession ?? old.session else { return true }
+        let confirmed = await revoke(grant, client: old.clientID)
+        try clearSession()
+        return confirmed
+    }
+
+    private func revoke(_ grant: ChatGPTSession, client: String) async -> Bool {
+        guard let token = grant.refreshToken ?? grant.accessToken else { return false }
+        for attempt in 0..<3 {
+            if Task.isCancelled { return false }
+            do {
+                let config = try await configuration()
+                guard let endpoint = config["revocation_endpoint"] as? String,
+                    let url = URL(string: endpoint), url.scheme == "https",
+                    url.host == "auth.openai.com"
+                else { return false }
+                var request = URLRequest(url: url)
+                request.httpMethod = "POST"
+                request.timeoutInterval = 10
+                request.setValue(
+                    "application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+                request.httpBody = form([
+                    "token": token,
+                    "token_type_hint": grant.refreshToken == nil ? "access_token" : "refresh_token",
+                    "client_id": client,
+                ])
+                let (_, response) = try await session.data(for: request)
+                guard let status = (response as? HTTPURLResponse)?.statusCode else { return false }
+                if status == 200 { return true }
+                if status < 500 { return false }
+            } catch let failure as ChatGPTFailure {
+                if let status = failure.status, status < 500 { return false }
+            } catch {
+                if !(error is URLError) { return false }
+            }
+            if attempt < 2 {
+                do { try await Task.sleep(for: .milliseconds(250 * (attempt + 1))) } catch {
+                    return false
+                }
+            }
+        }
+        return false
+    }
+
+    func answer(
+        input: [[String: Any]], language: String, model: ChatGPTModel, effort: String,
+        delta: (String) -> Void
+    ) async throws {
+        do {
+            guard model.supportsEffort(effort) else {
+                throw AppFailure.failed
+            }
+            let access = try await accessToken()
+            try Task.checkCancellation()
+            let prompt = try String(
+                contentsOf: Bundle.module.url(
+                    forResource: "prompt", withExtension: "md", subdirectory: "Resources")!,
+                encoding: .utf8)
+            var request = URLRequest(url: URL(string: "\(resource)/responses")!)
             request.httpMethod = "POST"
-            request.setValue(
-                "application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-            request.httpBody = form([
-                "token": old.refreshToken, "token_type_hint": "refresh_token",
-                "client_id": old.clientID,
-            ])
-            let (_, response) = try await session.data(for: request)
-            guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw AppFailure.failed }
+            request.timeoutInterval = 180
+            request.setValue("Bearer \(access)", forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            var body: [String: Any] = [
+                "model": model.slug, "store": false, "stream": true,
+                "instructions": prompt
+                    + "\nTrusted session setting: output language is \(language).",
+                "input": input,
+            ]
+            if !effort.isEmpty { body["reasoning"] = ["effort": effort] }
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+            let (bytes, response) = try await session.bytes(for: request)
+            #if DEBUG
+                FileHandle.standardError.write(
+                    Data(
+                        "[chatgpt] Responses HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)\n"
+                            .utf8))
+            #endif
+            guard let http = response as? HTTPURLResponse else { throw AppFailure.failed }
+            guard http.statusCode == 200 else {
+                throw try await responseFailure(bytes: bytes, response: http)
+            }
+
+            var completed = false
+            var hasText = false
+            for try await event in ResponseByteChunks(bytes: bytes).asDecodedServerSentEvents() {
+                try Task.checkCancellation()
+                guard let data = event.data,
+                    let body = try JSONSerialization.jsonObject(with: Data(data.utf8))
+                        as? [String: Any],
+                    let type = body["type"] as? String
+                else { continue }
+                if ["response.output_text.delta", "response.refusal.delta"].contains(type),
+                    let text = body["delta"] as? String
+                {
+                    hasText =
+                        hasText || !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    delta(text)
+                }
+                if type == "response.completed" {
+                    completed = true
+                    break
+                }
+                if ["response.failed", "response.incomplete", "error"].contains(type) {
+                    throw ChatGPTFailure(
+                        status: http.statusCode, body: Data(data.utf8),
+                        requestID: http.value(forHTTPHeaderField: "x-request-id"))
+                }
+            }
+            guard completed && hasText else { throw AppFailure.failed }
+        } catch is URLError {
+            try Task.checkCancellation()
+            throw ChatGPTFailure.generic
         }
     }
 
-    func answer(input: [[String: Any]], language: String, delta: (String) -> Void) async throws {
-        guard let configuration = sessionConfiguration else { throw AppFailure.failed }
-        let access = try await accessToken()
-        try Task.checkCancellation()
-        let prompt = try String(
-            contentsOf: Bundle.module.url(
-                forResource: "prompt", withExtension: "md", subdirectory: "Resources")!,
-            encoding: .utf8)
-        var request = URLRequest(url: URL(string: "\(resource)/responses")!)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 180
-        request.setValue("Bearer \(access)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        var body: [String: Any] = [
-            "model": configuration.model, "store": false, "stream": true,
-            "instructions": prompt + "\nTrusted session setting: output language is \(language).",
-            "input": input,
-        ]
-        if let effort = configuration.effort { body["reasoning"] = ["effort": effort] }
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        let (bytes, response) = try await session.bytes(for: request)
-        #if DEBUG
-            FileHandle.standardError.write(
-                Data(
-                    "[chatgpt] Responses HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)\n"
-                        .utf8))
-        #endif
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw AppFailure.failed }
-        var completed = false
-        var hasText = false
-        for try await event in ResponseByteChunks(bytes: bytes).asDecodedServerSentEvents() {
+    private func responseFailure(
+        bytes: URLSession.AsyncBytes, response: HTTPURLResponse
+    ) async throws -> ChatGPTFailure {
+        var body = Data()
+        do {
+            for try await byte in bytes {
+                try Task.checkCancellation()
+                body.append(byte)
+                if body.count >= 64_000 { break }
+            }
+        } catch {
             try Task.checkCancellation()
-            guard let data = event.data,
-                let body = try JSONSerialization.jsonObject(with: Data(data.utf8))
-                    as? [String: Any],
-                let type = body["type"] as? String
-            else { continue }
-            if ["response.output_text.delta", "response.refusal.delta"].contains(type),
-                let text = body["delta"] as? String
-            {
-                hasText = hasText || !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                delta(text)
-            }
-            if type == "response.completed" {
-                completed = true
-                break
-            }
-            if ["response.failed", "response.incomplete", "error"].contains(type) {
-                throw AppFailure.failed
-            }
+            if error is CancellationError { throw error }
+            // Headers and any received error payload remain authoritative
+            // even when the transport drops before the body reaches EOF.
         }
-        guard completed && hasText else { throw AppFailure.failed }
+        return ChatGPTFailure(
+            status: response.statusCode, body: body,
+            requestID: response.value(forHTTPHeaderField: "x-request-id"))
     }
 
     private func json(_ request: URLRequest) async throws -> [String: Any] {
-        let (data, response) = try await session.data(for: request)
+        let bytes: URLSession.AsyncBytes
+        let response: URLResponse
+        do { (bytes, response) = try await session.bytes(for: request) } catch is URLError {
+            try Task.checkCancellation()
+            throw ChatGPTFailure.generic
+        }
         #if DEBUG
             FileHandle.standardError.write(
                 Data(
                     "[chatgpt] \(request.url?.path ?? "") HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)\n"
                         .utf8))
         #endif
-        guard let status = (response as? HTTPURLResponse)?.statusCode, (200..<300).contains(status),
-            let result = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        guard let http = response as? HTTPURLResponse else { throw AppFailure.failed }
+        guard (200..<300).contains(http.statusCode) else {
+            throw try await responseFailure(bytes: bytes, response: http)
+        }
+        var data = Data()
+        do {
+            for try await byte in bytes {
+                try Task.checkCancellation()
+                data.append(byte)
+            }
+        } catch is URLError {
+            try Task.checkCancellation()
+            throw ChatGPTFailure.generic
+        }
+        guard let result = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { throw AppFailure.failed }
         return result
     }

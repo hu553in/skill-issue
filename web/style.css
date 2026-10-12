@@ -27,6 +27,7 @@ body {
 .meta {
   flex: none;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
@@ -38,10 +39,12 @@ body {
 
 .position {
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .status {
   display: inline-flex;
+  margin-inline-start: auto;
   align-items: center;
   gap: 6px;
 }
@@ -207,6 +210,11 @@ kbd {
   color: #8b3831;
   border-radius: 6px;
   font-size: 0.8em;
+}
+
+.connection-error {
+  flex: none;
+  margin: 14px 20px 0;
 }
 
 .welcome h1 {

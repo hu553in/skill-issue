@@ -11,12 +11,13 @@ final class Relay {
     let viewerURL: URL
     private var socket: URLSessionWebSocketTask?
     private var sequence = 0
+    private var controlsSequence = 0
     private var closed = false
     private var latest: ViewState?
     private var sendTask: Task<Void, Never>?
     private var readers: Set<String> = []
     private var acknowledgments: [String: Int] = [:]
-    var onConnection: ((Bool, Int) -> Void)?
+    var onConnection: ((Bool, Int, Int) -> Void)?
 
     private init(base: URL, room: String, writer: String, reader: String) {
         self.base = base
@@ -60,7 +61,8 @@ final class Relay {
             url: base.appendingPathComponent("rooms/\(room)/socket"), resolvingAgainstBaseURL: false
         )!
         endpoint.scheme = base.scheme == "https" ? "wss" : "ws"
-        let next = URLSession.shared.webSocketTask(with: endpoint.url!)
+        let next = URLSession.shared.webSocketTask(
+            with: endpoint.url!, protocols: ["skill-issue", "skill-issue.writer.\(writer)"])
         next.resume()
         // URLSession's WebSocket receive does not cancel with its awaiting Task.
         // Bound the ready handshake too: an upgraded but silent server can wait forever.
@@ -72,8 +74,6 @@ final class Relay {
         do {
             let message = try await withTaskCancellationHandler {
                 try Task.checkCancellation()
-                try await next.send(
-                    .string("{\"type\":\"auth\",\"role\":\"writer\",\"token\":\"\(writer)\"}"))
                 return try await next.receive()
             } onCancel: {
                 next.cancel(with: .goingAway, reason: nil)
@@ -86,7 +86,7 @@ final class Relay {
             socket = next
             readers = []
             acknowledgments = [:]
-            onConnection?(true, 0)
+            onConnection?(true, 0, 0)
             if let latest { try publish(latest) }
         } catch {
             next.cancel(with: .goingAway, reason: nil)
@@ -98,8 +98,13 @@ final class Relay {
     func publish(_ state: ViewState) throws {
         sequence += 1
         let packet = try encryptedPacket(state, room: room, sequence: sequence, key: key)
+        let controlsChanged =
+            latest?.selection != state.selection || latest?.selectedID != state.selectedID
+            || latest?.fontSize != state.fontSize || latest?.command != state.command
+        if controlsChanged { controlsSequence = sequence }
         latest = state
         guard let socket else { return }
+        if controlsChanged { connectionChanged() }
         let previous = sendTask
         sendTask = Task { [weak self] in
             await previous?.value
@@ -130,7 +135,7 @@ final class Relay {
                 socket = nil
                 readers = []
                 acknowledgments = [:]
-                onConnection?(false, 0)
+                onConnection?(false, 0, 0)
                 if !closed && !Task.isCancelled { try? await Task.sleep(for: .seconds(2)) }
             }
         }
@@ -145,14 +150,17 @@ final class Relay {
             box, using: key, authenticating: Data("\(room):ack:\(client):\(seq)".utf8))
         guard let ack = try JSONSerialization.jsonObject(with: plain) as? [String: Int],
             ack["seq"] == seq, let command = ack["command"], command >= 0,
-            command <= (latest?.command?.id ?? 0)
+            command == (latest?.command?.id ?? 0)
         else { return }
-        acknowledgments[client] = max(acknowledgments[client] ?? 0, command)
+        // History and zoom need their snapshot applied too. A current scroll
+        // command alone cannot confirm an older selection or font size.
+        acknowledgments[client] = max(acknowledgments[client] ?? 0, seq)
         connectionChanged()
     }
     private func connectionChanged() {
-        let current = latest?.command?.id ?? 0
-        onConnection?(socket != nil, acknowledgments.values.filter { $0 >= current }.count)
+        onConnection?(
+            socket != nil, readers.count,
+            acknowledgments.values.filter { $0 >= controlsSequence }.count)
     }
     func close() async throws {
         closed = true

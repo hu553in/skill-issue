@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
-import type { CSSProperties } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 
 import answerLanguages from "../native/Resources/answer-languages.json";
@@ -33,6 +33,8 @@ interface Update {
 }
 const restartGuide =
   "Start a new session on your Mac and open its viewer link.";
+const connectionGuide =
+  "Reload this viewer, or reopen it from Skill Issue on your Mac.";
 const App = () => {
   const [update, setUpdate] = useState<Update>({
     applied: () => {
@@ -117,9 +119,11 @@ const App = () => {
     let socket: ReconnectingWebSocket | undefined;
     let disposed = false;
     let ended = false;
+    let established = false;
     let generation = 0;
     let highest = 0;
-    let lastReceived = Date.now();
+    let started = Date.now();
+    let lastReceived = started;
     async function connect() {
       try {
         const { room, token, key: rawKey } = parseLink(fragment);
@@ -130,17 +134,21 @@ const App = () => {
           false,
           ["decrypt", "encrypt"]
         );
-        if (disposed) {
+        if (disposed || ended) {
           return;
         }
         const url = new URL(`/rooms/${room}/socket`, location.origin);
         url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-        const ws = new ReconnectingWebSocket(url.href, [], {
-          maxEnqueuedMessages: 0,
-          minReconnectionDelay: 1500,
-          shouldReconnectOnClose: (event) =>
-            !disposed && !ended && event.code !== 1008,
-        });
+        const ws = new ReconnectingWebSocket(
+          url.href,
+          ["skill-issue", `skill-issue.reader.${token}`],
+          {
+            maxEnqueuedMessages: 0,
+            minReconnectionDelay: 1500,
+            shouldReconnectOnClose: (event) =>
+              !disposed && !ended && event.code !== 1008,
+          }
+        );
         socket = ws;
         let queue = Promise.resolve();
         let client = "";
@@ -151,7 +159,6 @@ const App = () => {
           client = "";
           first = true;
           lastReceived = Date.now();
-          ws.send(JSON.stringify({ role: "reader", token, type: "auth" }));
         });
         ws.addEventListener("message", (event: MessageEvent<unknown>) => {
           if (disposed || ended) {
@@ -189,6 +196,7 @@ const App = () => {
               }
               if (packet.type === "ready") {
                 ({ client } = packet);
+                established = true;
                 if (!ended && ws.readyState === WebSocket.OPEN) {
                   setStatus("Connected");
                 }
@@ -270,6 +278,10 @@ const App = () => {
             setStatus(failure);
             return;
           }
+          if (established) {
+            established = false;
+            started = Date.now();
+          }
           setStatus("Reconnecting…");
         });
       } catch {
@@ -285,9 +297,18 @@ const App = () => {
         !disposed &&
         !ended &&
         document.visibilityState === "visible" &&
-        Date.now() - lastReceived > 35_000
+        Date.now() - (established ? lastReceived : started) > 35_000
       ) {
-        socket?.reconnect();
+        if (established) {
+          socket?.reconnect();
+        } else {
+          // Rejected upgrades expose no HTTP status to the browser. Bound each
+          // establishment without assuming why it failed or admitting a socket.
+          generation += 1;
+          ended = true;
+          setStatus(failure);
+          socket?.close();
+        }
       }
     }, 10_000);
     const visibility = () => {
@@ -401,13 +422,46 @@ const App = () => {
     (language) => language.name === state.language
   );
   const sessionEnded = status === "Session ended";
-  const busy = card?.status === "generating" && !sessionEnded;
-  const shownStatus = status === "Listening" && busy ? "Thinking…" : status;
+  const viewerFailed = status === failure;
+  const listening = status === "Listening";
+  const generating =
+    listening && state.answers.some((answer) => answer.status === "generating");
+  const busy = listening && card?.status === "generating";
+  const shownStatus = generating ? "Thinking…" : status;
   const answerPosition =
-    index === -1 ? "Ready" : `${index + 1} / ${state.answers.length}`;
-  const answerHeading = busy
-    ? "Preparing your answer…"
-    : "Press Space to request an answer.";
+    index === -1 ? "No answers yet" : `${index + 1} / ${state.answers.length}`;
+  const canRequest = state.canAnswer && listening;
+  let answerHeading = "Waiting for your Mac.";
+  let answerGuide: ReactNode =
+    "Your viewer will update when your Mac is ready.";
+  if (sessionEnded) {
+    answerHeading = "Session ended.";
+    answerGuide = restartGuide;
+  } else if (viewerFailed) {
+    answerHeading = "Couldn't open this viewer.";
+    answerGuide = connectionGuide;
+  } else if (status === "Mac disconnected") {
+    answerHeading = "Mac disconnected.";
+    answerGuide =
+      "Keep Skill Issue open on your Mac. The viewer will reconnect automatically.";
+  } else if (status === "Connecting…" || status === "Reconnecting…") {
+    answerHeading = status;
+    answerGuide = "Waiting for the viewer connection.";
+  } else if (busy) {
+    answerHeading = "Preparing your answer…";
+    answerGuide = "Keep listening. Your answer will appear here.";
+  } else if (canRequest) {
+    answerHeading = "Press Space to request an answer.";
+    answerGuide = (
+      <>
+        Hold <kbd>{state.modifiers}</kbd> and press <kbd>Space</kbd> on your
+        Mac.
+      </>
+    );
+  } else if (state.error) {
+    answerHeading = "Check your Mac to continue.";
+    answerGuide = "Open Settings in Skill Issue for the error and next steps.";
+  }
   const readingStyle: CSSProperties & { "--reading-size": string } = {
     "--reading-size": `${state.fontSize / 16}rem`,
   };
@@ -416,10 +470,15 @@ const App = () => {
       <div className="meta">
         <span className="position">{answerPosition}</span>
         <output className="status">
-          <i className={status === "Listening" ? "live" : ""} />
+          <i className={listening ? "live" : ""} />
           {shownStatus}
         </output>
       </div>
+      {viewerFailed && card !== undefined && card.text !== "" && (
+        <p className="error connection-error" role="alert">
+          The viewer connection stopped. {connectionGuide}
+        </p>
+      )}
       <section
         className="reading"
         ref={pane}
@@ -427,9 +486,12 @@ const App = () => {
         tabIndex={0}
         aria-label="Answer"
       >
-        {state.error && (
+        {state.error && !viewerFailed && (
           <p className="error" role="alert" data-anchor="error">
-            {failure}
+            Could not complete the request.{" "}
+            {canRequest
+              ? "Check the error in Settings on your Mac, then request another answer."
+              : "Check Settings on your Mac to continue."}
           </p>
         )}
         <article className="answer" lang={answerLanguage?.tag} aria-busy={busy}>
@@ -437,43 +499,33 @@ const App = () => {
             <Answer text={card.text} />
           ) : (
             <div className="empty" lang="en">
-              <h1 data-anchor="empty-heading">
-                {sessionEnded ? "Session ended." : answerHeading}
-              </h1>
-              <p data-anchor="empty-guide">
-                {sessionEnded && restartGuide}
-                {!sessionEnded &&
-                  busy &&
-                  "Keep listening. Your answer will appear here."}
-                {!sessionEnded && !busy && (
-                  <>
-                    Hold <kbd>{state.modifiers}</kbd> and press <kbd>Space</kbd>{" "}
-                    on your Mac.
-                  </>
-                )}
-              </p>
+              <h1 data-anchor="empty-heading">{answerHeading}</h1>
+              <p data-anchor="empty-guide">{answerGuide}</p>
             </div>
           )}
-          {card?.status === "incomplete" && (
+          {(card?.status === "incomplete" ||
+            (card?.status === "generating" && sessionEnded)) && (
             <p className="error" lang="en" data-anchor="answer-note">
               Incomplete answer
             </p>
           )}
-          {card?.status === "failed" && !state.error && (
+          {card?.status === "failed" && !state.error && !viewerFailed && (
             <p className="error" lang="en" data-anchor="error">
               {failure}
             </p>
           )}
         </article>
       </section>
-      {!sessionEnded && (
+      {!sessionEnded && !viewerFailed && (
         <footer className="hints">
           <span>
             Hold <kbd>{state.modifiers}</kbd>
           </span>
-          <span>
-            <kbd>Space</kbd> request answer
-          </span>
+          {canRequest && (
+            <span>
+              <kbd>Space</kbd> request answer
+            </span>
+          )}
           <span>
             <kbd>↑↓</kbd> read
           </span>

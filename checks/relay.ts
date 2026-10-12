@@ -13,6 +13,7 @@ export class RelaySession {
   readonly room: RoomCredentials;
   readonly key: CryptoKey;
   readonly writer: Peer;
+  readonly clientIP: string | undefined;
   readonly peers: Peer[] = [];
   private sequence = 0;
   private ended = false;
@@ -21,16 +22,21 @@ export class RelaySession {
     base: string,
     room: RoomCredentials,
     key: CryptoKey,
-    writer: Peer
+    writer: Peer,
+    clientIP: string | undefined
   ) {
     this.base = base;
     this.room = room;
     this.key = key;
     this.writer = writer;
+    this.clientIP = clientIP;
   }
 
-  static async create(base: string) {
-    const response = await fetch(`${base}/rooms`, { method: "POST" });
+  static async create(base: string, clientIP?: string) {
+    const response = await fetch(`${base}/rooms`, {
+      headers: clientIP === undefined ? {} : { "CF-Connecting-IP": clientIP },
+      method: "POST",
+    });
     if (!response.ok) {
       throw new Error(`Room creation failed: ${response.status}`);
     }
@@ -41,8 +47,8 @@ export class RelaySession {
       ["encrypt", "decrypt"]
     );
     const endpoint = `${base.replace(/^http/u, "ws")}/rooms/${room.id}/socket`;
-    const writer = new Peer(endpoint, "writer", room.writer);
-    const session = new RelaySession(base, room, key, writer);
+    const writer = new Peer(endpoint, "writer", room.writer, clientIP);
+    const session = new RelaySession(base, room, key, writer, clientIP);
     session.peers.push(writer);
     try {
       await writer.next("ready");
@@ -68,7 +74,8 @@ export class RelaySession {
     const peer = new Peer(
       `${this.base.replace(/^http/u, "ws")}/rooms/${this.room.id}/socket`,
       role,
-      token
+      token,
+      this.clientIP
     );
     this.peers.push(peer);
     const ready = await peer.next("ready");
@@ -103,7 +110,12 @@ export class RelaySession {
       return;
     }
     const response = await fetch(`${this.base}/rooms/${this.room.id}/end`, {
-      headers: { Authorization: `Bearer ${this.room.writer}` },
+      headers: {
+        ...(this.clientIP === undefined
+          ? {}
+          : { "CF-Connecting-IP": this.clientIP }),
+        Authorization: `Bearer ${this.room.writer}`,
+      },
       method: "POST",
     });
     if (!response.ok) {

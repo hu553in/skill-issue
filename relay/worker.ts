@@ -8,7 +8,6 @@ import { parse } from "valibot";
 
 import {
   AckPacketSchema,
-  AuthMessageSchema,
   maxPacketLength,
   StatePacketSchema,
 } from "../protocol";
@@ -20,7 +19,8 @@ interface Session {
 }
 interface Peer {
   id: string;
-  role?: "writer" | "reader";
+  role: "writer" | "reader";
+  retired?: true;
 }
 interface Latest {
   seq: number;
@@ -166,15 +166,91 @@ export class Room extends DurableObject<Env> {
     }
     if (
       !path.endsWith("/socket") ||
-      request.headers.get("Upgrade")?.toLowerCase() !== "websocket" ||
-      this.ctx.getWebSockets().length >= 32
+      request.headers.get("Upgrade")?.toLowerCase() !== "websocket"
+    ) {
+      return error();
+    }
+    const protocols = request.headers
+      .get("Sec-WebSocket-Protocol")
+      ?.split(",")
+      .map((value) => value.trim());
+    if (protocols?.length !== 2 || protocols[0] !== "skill-issue") {
+      return error();
+    }
+    const credentials =
+      /^skill-issue\.(?<role>writer|reader)\.(?<token>[A-Za-z0-9_-]{43})$/u.exec(
+        protocols[1] ?? ""
+      );
+    if (!credentials) {
+      return error();
+    }
+    const role =
+      credentials.groups?.["role"] === "writer" ? "writer" : "reader";
+    const digest = await hash(credentials.groups?.["token"] ?? "");
+    // Token verification yields. Re-read the session before admitting a socket,
+    // so deletion or expiration during verification cannot revive a room.
+    const current = await this.ctx.storage.get<Session>("session");
+    if (
+      !current ||
+      current.expires <= Date.now() ||
+      digest !== current[role === "writer" ? "writerHash" : "readerHash"]
+    ) {
+      return error();
+    }
+    const retained = this.ctx.getWebSockets();
+    // CLOSING sockets remain owned by the runtime until their peer confirms
+    // Close. Count them too, and reserve two slots for publisher replacement.
+    if (
+      retained.length >= 32 ||
+      (role === "reader" &&
+        retained.filter((socket) => attachment(socket).role === "reader")
+          .length >= 30)
     ) {
       return error();
     }
     const pair = new WebSocketPair();
+    const peer: Peer = { id: crypto.randomUUID(), role };
     this.ctx.acceptWebSocket(pair[1]);
-    pair[1].serializeAttachment({ id: crypto.randomUUID() } satisfies Peer);
-    return new Response(null, { status: 101, webSocket: pair[0] });
+    pair[1].serializeAttachment(peer);
+    if (role === "writer") {
+      for (const old of retained) {
+        const previous = attachment(old);
+        if (previous.role === "writer" && !previous.retired) {
+          // Persist retirement: hibernation can report a still-retained closing
+          // socket as OPEN again, but it must never become the publisher again.
+          old.serializeAttachment({
+            ...previous,
+            retired: true,
+          } satisfies Peer);
+          closePeer(old, 1000);
+        }
+      }
+    }
+    notify(pair[1], JSON.stringify({ client: peer.id, type: "ready" }));
+    this.peersChanged();
+    if (role === "reader") {
+      const latest = await this.latest();
+      if (latest !== undefined && latest.length > 0) {
+        notify(pair[1], latest);
+      }
+      if (
+        !this.ctx
+          .getWebSockets()
+          .some(
+            (socket) =>
+              socket.readyState === WebSocket.OPEN &&
+              attachment(socket).role === "writer" &&
+              !attachment(socket).retired
+          )
+      ) {
+        notify(pair[1], '{"type":"offline"}');
+      }
+    }
+    return new Response(null, {
+      headers: { "Sec-WebSocket-Protocol": "skill-issue" },
+      status: 101,
+      webSocket: pair[0],
+    });
   }
 
   override async webSocketMessage(
@@ -182,6 +258,9 @@ export class Room extends DurableObject<Env> {
     message: string | ArrayBuffer
   ) {
     try {
+      if (socket.readyState !== WebSocket.OPEN) {
+        return;
+      }
       if (typeof message !== "string" || message.length > maxPacketLength) {
         throw new Error("Invalid room message");
       }
@@ -191,44 +270,8 @@ export class Room extends DurableObject<Env> {
       }
       const body: unknown = JSON.parse(message);
       const peer = attachment(socket);
-      if (!peer.role) {
-        const auth = parse(AuthMessageSchema, body);
-        const digest = await hash(auth.token);
-        if (auth.role === "writer" && digest === session.writerHash) {
-          peer.role = "writer";
-        } else if (auth.role === "reader" && digest === session.readerHash) {
-          peer.role = "reader";
-        } else {
-          throw new Error("Invalid room message");
-        }
-        if (peer.role === "writer") {
-          for (const old of this.ctx.getWebSockets()) {
-            if (old !== socket && attachment(old).role === "writer") {
-              closePeer(old, 1000);
-            }
-          }
-        }
-        socket.serializeAttachment(peer);
-        notify(socket, JSON.stringify({ client: peer.id, type: "ready" }));
-        this.peersChanged();
-        if (peer.role === "reader") {
-          const latest = await this.latest();
-          if (latest !== undefined && latest.length > 0) {
-            notify(socket, latest);
-          }
-          if (
-            !this.ctx
-              .getWebSockets()
-              .some(
-                (s) =>
-                  s.readyState === WebSocket.OPEN &&
-                  attachment(s).role === "writer"
-              )
-          ) {
-            notify(socket, '{"type":"offline"}');
-          }
-        }
-        return;
+      if (peer.retired) {
+        throw new Error("Invalid room message");
       }
       const latest = await this.ctx.storage.get<Latest>("snapshot");
       if (peer.role === "reader") {
@@ -237,7 +280,10 @@ export class Room extends DurableObject<Env> {
           throw new Error("Invalid room message");
         }
         for (const writer of this.ctx.getWebSockets()) {
-          if (attachment(writer).role === "writer") {
+          if (
+            attachment(writer).role === "writer" &&
+            !attachment(writer).retired
+          ) {
             notify(
               writer,
               JSON.stringify({
@@ -252,7 +298,11 @@ export class Room extends DurableObject<Env> {
         return;
       }
       const state = parse(StatePacketSchema, body);
-      if (peer.role !== "writer" || state.seq <= (latest?.seq ?? 0)) {
+      if (
+        peer.role !== "writer" ||
+        attachment(socket).retired ||
+        state.seq <= (latest?.seq ?? 0)
+      ) {
         throw new Error("Invalid room message");
       }
       // Small storage values also support snapshots larger than one KV value.
@@ -301,7 +351,7 @@ export class Room extends DurableObject<Env> {
       .filter((socket) => attachment(socket).role === "reader")
       .map((socket) => attachment(socket).id);
     for (const writer of sockets) {
-      if (attachment(writer).role === "writer") {
+      if (attachment(writer).role === "writer" && !attachment(writer).retired) {
         notify(writer, JSON.stringify({ readers, type: "peers" }));
       }
     }
@@ -316,7 +366,8 @@ export class Room extends DurableObject<Env> {
           (other) =>
             other !== socket &&
             other.readyState === WebSocket.OPEN &&
-            attachment(other).role === "writer"
+            attachment(other).role === "writer" &&
+            !attachment(other).retired
         )
     ) {
       for (const reader of this.ctx.getWebSockets()) {

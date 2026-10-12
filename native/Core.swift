@@ -34,6 +34,7 @@ struct ViewState: Codable, Equatable, Sendable {
     // swiftlint:disable:next unused_declaration
     var version = 1
     var live = false
+    var canAnswer = false
     var answers: [AnswerCard] = []
     var selectedID: String?
     var selection = 0

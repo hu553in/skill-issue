@@ -15,6 +15,7 @@ const command = v.object({
 });
 export const ViewStateSchema = v.object({
   answers: v.array(answer),
+  canAnswer: v.boolean(),
   command: v.nullish(command),
   error: v.string(),
   fontSize: v.pipe(v.number(), v.finite(), v.minValue(16), v.maxValue(40)),
@@ -27,11 +28,6 @@ export const ViewStateSchema = v.object({
 });
 export type ViewState = v.InferOutput<typeof ViewStateSchema>;
 
-export const AuthMessageSchema = v.object({
-  role: v.picklist(["writer", "reader"]),
-  token: v.pipe(v.string(), v.maxLength(100)),
-  type: v.literal("auth"),
-});
 export const StatePacketSchema = v.object({
   box: v.pipe(encoded, v.maxLength(maxPacketLength)),
   seq: sequence,

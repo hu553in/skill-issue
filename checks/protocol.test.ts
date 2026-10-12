@@ -7,7 +7,6 @@ import { safeParse } from "valibot";
 
 import {
   AckPacketSchema,
-  AuthMessageSchema,
   maxPacketLength,
   parseViewerMessage,
   StatePacketSchema,
@@ -65,6 +64,8 @@ test("decrypted snapshots reject invalid domain fields without coercion", () => 
   const invalid = [
     { version: 2 },
     { live: "true" },
+    { canAnswer: "true" },
+    { canAnswer: undefined },
     { answers: null },
     { answers: [null] },
     { answers: [{ id: 1, status: "complete", text: "text" }] },
@@ -114,24 +115,6 @@ test("protocol schemas preserve ignored extensions and enforce recognized packet
   expect(parseViewerMessage({ extra: true, type: "ended" })).toEqual({
     type: "ended",
   });
-  expect(
-    safeParse(AuthMessageSchema, { role: "reader", token: "", type: "auth" })
-      .success
-  ).toBe(true);
-  for (const fields of [
-    { role: "owner" },
-    { token: 1 },
-    { token: "a".repeat(101) },
-  ]) {
-    expect(
-      safeParse(AuthMessageSchema, {
-        role: "reader",
-        token: "token",
-        type: "auth",
-        ...fields,
-      }).success
-    ).toBe(false);
-  }
   expect(
     safeParse(StatePacketSchema, {
       box: "A".repeat(maxPacketLength),

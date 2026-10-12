@@ -1,7 +1,49 @@
+import { connect } from "node:net";
+
 import type { ViewState } from "../../protocol";
 import { acknowledgment, decrypt, empty, unbase64 } from "../../web/session";
 import { expect, test } from "./fixtures";
 import { Peer } from "./peer";
+
+async function silentPeer(base: string, room: string, ip: string) {
+  const url = new URL(base);
+  // Raw TCP peers never acknowledge WebSocket Close frames.
+  const socket = connect(Number(url.port), url.hostname);
+  const response = Promise.withResolvers<number>();
+  let bytes = Buffer.alloc(0);
+  let upgraded = false;
+  socket.setTimeout(5000, () => {
+    socket.destroy(new Error("Timed out opening the silent WebSocket"));
+  });
+  socket.once("error", response.reject);
+  socket.once("connect", () => {
+    socket.write(
+      `GET /rooms/${room}/socket HTTP/1.1\r\nHost: ${url.host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nCF-Connecting-IP: ${ip}\r\n\r\n`
+    );
+  });
+  socket.on("data", (chunk) => {
+    bytes = Buffer.concat([
+      bytes,
+      typeof chunk === "string" ? Buffer.from(chunk) : chunk,
+    ]);
+    if (!upgraded) {
+      const end = bytes.indexOf("\r\n\r\n");
+      if (end === -1) {
+        return;
+      }
+      const status = Number(bytes.toString("ascii", 0, end).split(" ")[1]);
+      bytes = bytes.subarray(end + 4);
+      upgraded = true;
+      socket.setTimeout(0);
+      response.resolve(status);
+    }
+  });
+  const status = await response.promise;
+  return {
+    socket,
+    status,
+  };
+}
 
 test("queued snapshot packets are delivered once and in order", async ({
   relay,
@@ -106,7 +148,7 @@ test("reader tokens cannot authenticate writers, publish snapshots or end the ro
   );
   relay.peers.push(rejected);
   const rejectedClose = await rejected.closed;
-  expect(rejectedClose.code).toBe(1008);
+  expect(rejectedClose.code).toBe(1006);
   const reader = await relay.connect("reader");
   const packet = await relay.publish({ ...empty, live: true });
   await reader.peer.next("state");
@@ -131,29 +173,55 @@ test("reader tokens cannot authenticate writers, publish snapshots or end the ro
   expect(deleted.status()).toBe(400);
 });
 
-test("a replacement writer closes its predecessor and publishes to existing readers", async ({
+test("unauthorized raw sockets are denied before upgrade across repeated no-close-ack waves", async ({
   relay,
 }) => {
   const reader = await relay.connect("reader");
-  const replacement = await relay.connect("writer");
-  const replaced = await relay.writer.closed;
-  expect(replaced.code).toBe(1000);
-  const state = {
-    ...empty,
-    answers: [
-      {
-        id: "replacement",
-        status: "complete" as const,
-        text: "A new publisher.",
-      },
-    ],
-    live: true,
-    selectedID: "replacement",
-  };
-  await relay.publish(state, replacement.peer);
-  expect(
-    await decrypt(relay.key, relay.room.id, await reader.peer.next("state"))
-  ).toEqual(state);
+  const attempts: Awaited<ReturnType<typeof silentPeer>>[] = [];
+  try {
+    for (let wave = 0; wave < 3; wave += 1) {
+      // Distinct fixture IPs isolate authorization from the per-IP rate quota.
+      // oxlint-disable-next-line no-await-in-loop
+      const peers = await Promise.all(
+        Array.from(
+          { length: 30 },
+          async (_, index) =>
+            await silentPeer(
+              relay.base,
+              relay.room.id,
+              `192.0.${wave + 2}.${index + 1}`
+            )
+        )
+      );
+      attempts.push(...peers);
+      expect(peers.map((peer) => peer.status)).toEqual(
+        Array.from({ length: 30 }, () => 400)
+      );
+    }
+    const replacement = await relay.connect("writer");
+    const replaced = await relay.writer.closed;
+    expect(replaced.code).toBe(1000);
+    const state = {
+      ...empty,
+      answers: [
+        {
+          id: "replacement",
+          status: "complete" as const,
+          text: "A new publisher.",
+        },
+      ],
+      live: true,
+      selectedID: "replacement",
+    };
+    await relay.publish(state, replacement.peer);
+    expect(
+      await decrypt(relay.key, relay.room.id, await reader.peer.next("state"))
+    ).toEqual(state);
+  } finally {
+    for (const peer of attempts) {
+      peer.socket.destroy();
+    }
+  }
 });
 
 test("HTTP routes and asset security headers match the deployed Worker contract", async ({

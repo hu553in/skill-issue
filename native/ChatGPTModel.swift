@@ -5,6 +5,10 @@ struct ChatGPTModel: Identifiable, Sendable {
     var id: String { slug }
     var defaultEffort: String { efforts.contains("low") ? "low" : efforts.first ?? "" }
 
+    func supportsEffort(_ effort: String) -> Bool {
+        efforts.isEmpty ? effort.isEmpty : efforts.contains(effort)
+    }
+
     init(fields: [String: Any]) throws {
         guard let slug = fields["slug"] as? String, !slug.isEmpty,
             let name = fields["display_name"] as? String, !name.isEmpty

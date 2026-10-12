@@ -8,6 +8,13 @@ type Message =
   | { type: "offline" }
   | { type: "ended" };
 type TypedMessage<T extends Message["type"]> = Extract<Message, { type: T }>;
+// Bun and Node accept handshake headers; lib.dom only declares browser overloads.
+const Socket = WebSocket as typeof WebSocket & {
+  new (
+    endpoint: string,
+    options: { protocols: string[]; headers: Record<string, string> }
+  ): WebSocket;
+};
 
 export class Peer {
   readonly socket: WebSocket;
@@ -15,18 +22,19 @@ export class Peer {
   private readonly messages: Message[] = [];
   private readonly waiting = new Set<() => void>();
 
-  constructor(endpoint: string, role: "writer" | "reader", token: string) {
-    this.socket = new WebSocket(endpoint);
+  constructor(
+    endpoint: string,
+    role: "writer" | "reader",
+    token: string,
+    clientIP?: string
+  ) {
+    this.socket = new Socket(endpoint, {
+      headers: clientIP === undefined ? {} : { "CF-Connecting-IP": clientIP },
+      protocols: ["skill-issue", `skill-issue.${role}.${token}`],
+    });
     const closed = Promise.withResolvers<CloseEvent>();
     this.closed = closed.promise;
     this.socket.addEventListener("close", closed.resolve, { once: true });
-    this.socket.addEventListener(
-      "open",
-      () => {
-        this.send({ role, token, type: "auth" });
-      },
-      { once: true }
-    );
     this.socket.addEventListener("message", (event) => {
       this.messages.push(JSON.parse(String(event.data)) as Message);
       for (const notify of this.waiting) {

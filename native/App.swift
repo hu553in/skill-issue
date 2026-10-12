@@ -27,11 +27,51 @@ final class Model: ObservableObject {
     @Published private(set) var modelSlug = ""
     @Published private(set) var reasoningEffort = ""
     @Published private(set) var catalogError = ""
+    @Published private(set) var feedback: ChatGPTFailure?
     @Published var account = ""
     @Published var link: URL?
-    @Published var working = false
-    @Published var status = "Ready"
+    private enum Operation {
+        case restoringAccounts, signingIn, requestingPermission, signingOut, loadingModels
+        case preparingSpeech(String)
+        case starting(String)
+        case stopping
+
+        var label: String {
+            switch self {
+            case .restoringAccounts: return "Restoring accounts…"
+            case .signingIn: return "Signing in…"
+            case .requestingPermission: return "Waiting for permission…"
+            case .signingOut: return "Signing out…"
+            case .loadingModels: return "Loading models…"
+            case .preparingSpeech(let label), .starting(let label): return label
+            case .stopping: return "Stopping…"
+            }
+        }
+    }
+    @Published private var operation: Operation?
+    var working: Bool { operation != nil }
+    var status: String {
+        if let operation { return operation.label }
+        if state.live { return answering ? "Thinking…" : "Listening" }
+        if account.isEmpty { return "Signed out" }
+        if chatGPT.requiresSignIn { return "Sign in required" }
+        if needsPlanPermission { return "Permission required" }
+        return canStartSession ? "Ready" : "Unavailable"
+    }
+    var loadingModels: Bool {
+        if case .loadingModels = operation { return true }
+        return false
+    }
+    var modelPlaceholder: String {
+        if loadingModels { return "Loading…" }
+        if case .restoringAccounts = operation { return "Restoring accounts…" }
+        if !chatGPT.accountsRestored { return "Unavailable" }
+        if account.isEmpty { return "Sign in first" }
+        return needsPlanPermission ? "Enable plan usage first" : "Unavailable"
+    }
+    var effortPlaceholder: String { loadingModels ? "Loading…" : "Not available" }
     @Published var viewerStatus = "Open the viewer on your phone."
+    @Published private(set) var viewerDelivery = ""
     @Published var iconVisible = true
     @Published var error = ""
     @Published var state = ViewState()
@@ -51,17 +91,32 @@ final class Model: ObservableObject {
     private var settingsTask: Task<Void, Never>?
     private var terminating = false
     private var captureFailure: UUID?
-    var canAnswer: Bool { state.live && !working && !account.isEmpty }
+    private var canUseChatGPT: Bool {
+        !account.isEmpty && chatGPT.canUsePlan && !chatGPT.requiresSignIn
+    }
+    var canAnswer: Bool { state.live && !working && canUseChatGPT && selectedModel != nil }
+    var needsPlanPermission: Bool { !account.isEmpty && !chatGPT.canUsePlan }
+    var savedAccounts: [ChatGPTAccount] { chatGPT.registrations }
+    var selectedAccountID: String { chatGPT.account?.clientID ?? "" }
+    var activeAccountLabel: String {
+        guard !account.isEmpty, let saved = chatGPT.account else { return account }
+        return accountLabel(saved)
+    }
+    var canAuthenticate: Bool {
+        !terminating && !working && !state.live && chatGPT.accountsRestored
+    }
+    var canChooseAccount: Bool { canAuthenticate && account.isEmpty }
     var selectedModel: ChatGPTModel? { models.first { $0.slug == modelSlug } }
-    var canSelectModel: Bool { !terminating && !working && !state.live && !models.isEmpty }
+    var answering: Bool { state.answers.contains { $0.status == "generating" } }
+    var canSelectModel: Bool { !terminating && !working && !answering && !models.isEmpty }
     var canSelectEffort: Bool { canSelectModel && !(selectedModel?.efforts.isEmpty ?? true) }
     var canStartSession: Bool {
-        guard !terminating, !working, !state.live, !account.isEmpty, let model = selectedModel
+        guard !terminating, !working, !state.live, canUseChatGPT,
+            let model = selectedModel
         else {
             return false
         }
-        return model.efforts.isEmpty
-            ? reasoningEffort.isEmpty : model.efforts.contains(reasoningEffort)
+        return model.supportsEffort(reasoningEffort)
     }
 
     init(chatGPT: ChatGPT = ChatGPT(), defaults: UserDefaults = .standard) {
@@ -72,42 +127,87 @@ final class Model: ObservableObject {
         language = defaults.string(forKey: "language") ?? "English"
         let savedFontSize = defaults.integer(forKey: "fontSize")
         if fontSizeRange.contains(savedFontSize) { state.fontSize = savedFontSize }
-        working = true
-        status = "Loading…"
+        chatGPT.accountStateChanged = { [weak self] failure in
+            guard let self else { return }
+            self.syncAccount()
+            if let failure { self.showError(failure) }
+            self.publish()
+        }
+        restoreAccounts()
+    }
+    private func restoreAccounts() {
+        guard !terminating, !working, !state.live else { return }
+        operation = .restoringAccounts
+        clearFeedback()
         settingsTask = Task {
             defer { finishSettings() }
             do {
                 try await chatGPT.restore()
                 try Task.checkCancellation()
-                account = chatGPT.credentials?.email ?? ""
+                syncAccount()
                 await loadModels()
-            } catch { if !Task.isCancelled { showError() } }
+            } catch {
+                if !Task.isCancelled {
+                    showError(
+                        chatGPT.accountsRestored ? error : ChatGPTFailure.accountStorageUnavailable)
+                }
+            }
         }
     }
     func authenticate() {
-        guard !terminating, !working, !state.live else { return }
-        working = true
-        error = ""
+        updateAuthentication(signingOut: chatGPT.isSignedIn)
+    }
+    func enablePlanUsage() {
+        guard needsPlanPermission else { return }
+        updateAuthentication(signingOut: false, requestPlanConsent: true)
+    }
+    func selectAccount(_ clientID: String) {
+        guard canChooseAccount, clientID != selectedAccountID else { return }
+        do {
+            try chatGPT.selectAccount(clientID: clientID.isEmpty ? nil : clientID)
+            clearFeedback()
+            syncAccount()
+        } catch { showError(error) }
+    }
+    func accountLabel(_ saved: ChatGPTAccount) -> String {
+        guard savedAccounts.filter({ $0.email == saved.email }).count > 1,
+            let index = savedAccounts.firstIndex(where: { $0.clientID == saved.clientID })
+        else { return saved.email }
+        return "\(saved.email) · Account \(index + 1)"
+    }
+    private func updateAuthentication(
+        signingOut: Bool, requestPlanConsent: Bool = false
+    ) {
+        guard canAuthenticate else { return }
+        operation =
+            signingOut ? .signingOut : requestPlanConsent ? .requestingPermission : .signingIn
+        clearFeedback()
         clearModels()
         settingsTask = Task {
             defer { finishSettings() }
             do {
-                if account.isEmpty {
-                    try await chatGPT.signIn()
+                if signingOut {
+                    let confirmed = try await chatGPT.signOut()
+                    if !confirmed {
+                        showError(ChatGPTFailure.remoteSignOutUnconfirmed)
+                    }
                 } else {
-                    try await chatGPT.signOut()
+                    try await chatGPT.signIn(requestPlanConsent: requestPlanConsent)
                 }
             } catch {
-                if !Task.isCancelled { showError() }
+                if !Task.isCancelled { showError(error) }
+                syncAccount()
+                return
             }
+            syncAccount()
             guard !Task.isCancelled else { return }
-            account = chatGPT.credentials?.email ?? ""
             await loadModels()
         }
     }
     func retryModels() {
-        guard !terminating, !working, !state.live, !account.isEmpty else { return }
-        working = true
+        guard canRetryModels else { return }
+        operation = .loadingModels
+        clearFeedback()
         clearModels()
         settingsTask = Task {
             defer { finishSettings() }
@@ -116,7 +216,11 @@ final class Model: ObservableObject {
     }
     private func loadModels() async {
         guard !account.isEmpty else { return }
-        status = "Loading models…"
+        guard chatGPT.canUsePlan else {
+            showError(ChatGPTFailure.planDisabled)
+            return
+        }
+        operation = .loadingModels
         do {
             let available = try await chatGPT.listModels()
             try Task.checkCancellation()
@@ -132,9 +236,85 @@ final class Model: ObservableObject {
                 ? savedEffort : selected.defaultEffort
             saveModelSelection()
         } catch {
-            if !Task.isCancelled {
-                catalogError = "Could not load ChatGPT models. Retry or sign in again."
-            }
+            if !Task.isCancelled { showError(error, catalog: true) }
+        }
+    }
+    private func syncAccount() {
+        account = chatGPT.isSignedIn ? chatGPT.account?.email ?? "Connected" : ""
+        if !chatGPT.isSignedIn || !chatGPT.canUsePlan { clearModels() }
+    }
+    private func clearFeedback() {
+        error = ""
+        catalogError = ""
+        feedback = nil
+        state.error = ""
+    }
+    var recovery: ChatGPTFailure.Recovery {
+        if chatGPT.requiresSignIn { return .signIn }
+        let recovery = feedback?.recovery ?? (catalogError.isEmpty ? .none : .retry)
+        if case .retry = recovery, !chatGPT.isSignedIn { return .signIn }
+        return recovery
+    }
+    var recoveryTitle: String? {
+        switch recovery {
+        case .restore, .save: return "Retry"
+        case .signIn: return "Sign in again"
+        case .enablePlan: return "Enable plan usage"
+        case .usage: return "View usage"
+        case .settings: return "Open ChatGPT"
+        case .retry: return state.live ? "Request answer" : "Retry"
+        case .configuration, .none: return nil
+        }
+    }
+    var canRetryModels: Bool {
+        !terminating && !working && !state.live && canUseChatGPT
+    }
+    var canRecover: Bool {
+        switch recovery {
+        case .restore: return !terminating && !working && !state.live
+        case .save: return !terminating && !working
+        case .signIn, .enablePlan: return !terminating && !working && !state.live
+        case .usage, .settings: return true
+        case .retry:
+            return state.live ? canAnswer : canRetryModels
+        case .configuration, .none: return false
+        }
+    }
+    var recoveryHint: String {
+        guard state.live else { return "" }
+        switch recovery {
+        case .signIn: return "Stop the session to sign in again."
+        case .enablePlan: return "Stop the session to enable ChatGPT plan usage."
+        default: return ""
+        }
+    }
+    func recover() {
+        guard canRecover else { return }
+        switch recovery {
+        case .restore: restoreAccounts()
+        case .save:
+            do {
+                try chatGPT.savePendingAccounts()
+                clearFeedback()
+                syncAccount()
+                if needsPlanPermission {
+                    showError(ChatGPTFailure.planDisabled)
+                } else if !state.live {
+                    retryModels()
+                }
+                publish()
+            } catch { showError(error) }
+        case .signIn:
+            updateAuthentication(signingOut: false, requestPlanConsent: false)
+        case .enablePlan:
+            updateAuthentication(signingOut: false, requestPlanConsent: true)
+        case .usage:
+            NSWorkspace.shared.open(URL(string: "https://chatgpt.com/settings/usage")!)
+        case .settings:
+            NSWorkspace.shared.open(URL(string: "https://chatgpt.com/")!)
+        case .retry:
+            if state.live { answer() } else { retryModels() }
+        case .configuration, .none: break
         }
     }
     private func clearModels() {
@@ -145,8 +325,7 @@ final class Model: ObservableObject {
     }
     private func finishSettings() {
         settingsTask = nil
-        working = false
-        status = "Ready"
+        operation = nil
     }
     func selectModel(_ slug: String) {
         guard canSelectModel, slug != modelSlug,
@@ -171,9 +350,8 @@ final class Model: ObservableObject {
         publishTask?.cancel()
         monitorTask?.cancel()
         cancelAnswer()
-        working = true
-        error = ""
-        status = "Preparing…"
+        operation = .preparingSpeech("Preparing speech…")
+        clearFeedback()
         sessionID = UUID()
         let session = sessionID
         history = InterviewHistory()
@@ -189,35 +367,43 @@ final class Model: ObservableObject {
             do {
                 try Task.checkCancellation()
                 try await capture.prepare { [weak self] message in
-                    Task { @MainActor in if self?.sessionID == session { self?.status = message } }
+                    Task { @MainActor in
+                        guard let self, self.sessionID == session,
+                            case .preparingSpeech = self.operation
+                        else { return }
+                        self.operation = .preparingSpeech(message)
+                    }
                 }
                 try Task.checkCancellation()
-                status = "Connecting ChatGPT…"
+                operation = .starting("Connecting ChatGPT…")
                 try await chatGPT.prepareSession(model: model, effort: effort)
                 try Task.checkCancellation()
-                status = "Connecting viewer…"
+                operation = .starting("Connecting viewer…")
                 let relay = try await Relay.create(
                     url: relayURL.trimmingCharacters(in: .whitespacesAndNewlines))
                 self.relay = relay
                 link = relay.viewerURL
                 try Task.checkCancellation()
-                relay.onConnection = { [weak self] connected, count in
+                relay.onConnection = { [weak self] connected, count, applied in
                     guard let self, self.sessionID == session else { return }
                     self.viewerStatus =
                         !connected
                         ? "Reconnecting viewer…"
                         : count == 0
-                            ? "Open the viewer on your phone." : "Viewer ready · \(count) connected"
+                            ? "Open the viewer on your phone." : "Viewer connected · \(count)"
+                    self.viewerDelivery =
+                        connected && count > 0
+                        ? applied == count ? "Controls synced" : "Syncing controls…" : ""
                 }
-                status = "Starting capture…"
+                operation = .starting("Starting capture…")
                 try await capture.start(
                     microphone: microphone,
                     failed: { [weak self] in self?.captureFailed(session: session) })
                 try Task.checkCancellation()
                 guard captureFailure != session else { throw AppFailure.failed }
                 state.live = true
-                status = "Listening"
-                working = false
+                operation = nil
+                state.canAnswer = canAnswer
                 try relay.publish(state)
                 publishTask = Task { [weak self] in
                     var previous = self?.state
@@ -226,6 +412,7 @@ final class Model: ObservableObject {
                         do {
                             try await Task.sleep(for: .milliseconds(150))
                             guard let self, self.sessionID == session else { return }
+                            self.state.canAnswer = self.canAnswer
                             if self.state != previous || Date().timeIntervalSince(heartbeat) >= 15 {
                                 try relay.publish(self.state)
                                 previous = self.state
@@ -233,7 +420,7 @@ final class Model: ObservableObject {
                             }
                         } catch {
                             if !Task.isCancelled, let self, self.sessionID == session {
-                                self.endSession(failed: true)
+                                self.endSession(failed: true, error: error)
                             }
                             return
                         }
@@ -241,7 +428,7 @@ final class Model: ObservableObject {
                 }
                 monitorTask = Task { await relay.monitor() }
             } catch {
-                await endSession(failed: !Task.isCancelled).value
+                await endSession(failed: !Task.isCancelled, error: error).value
             }
         }
     }
@@ -250,11 +437,10 @@ final class Model: ObservableObject {
         endSession()
     }
     @discardableResult
-    func endSession(failed: Bool = false) -> Task<Void, Never> {
-        if failed { showError() }
+    func endSession(failed: Bool = false, error: Error? = nil) -> Task<Void, Never> {
+        if failed { showError(error ?? AppFailure.failed) }
         if let endingTask { return endingTask }
-        working = true
-        status = "Stopping…"
+        operation = .stopping
         state.live = false
         cancelAnswer()
         sessionID = UUID()
@@ -267,26 +453,30 @@ final class Model: ObservableObject {
         let old = relay
         relay = nil
         link = nil
+        viewerStatus = "Open the viewer on your phone."
+        viewerDelivery = ""
         let task = Task {
             async let stopped: Void = capture.stop()
-            do { try await old?.close() } catch { showError() }
+            do { try await old?.close() } catch {
+                if self.error.isEmpty && catalogError.isEmpty { showError(error) }
+            }
             await stopped
-            status = "Ready"
-            working = false
+            operation = nil
             endingTask = nil
         }
         endingTask = task
         return task
     }
     func answer() {
-        guard canAnswer else { return }
+        guard canAnswer, let model = selectedModel else { return }
+        let effort = reasoningEffort
         cancelAnswer()
         let id = UUID().uuidString
         let session = sessionID
         currentRequest = id
         state.beginAnswer(id: id)
         state.error = ""
-        error = ""
+        clearFeedback()
         let previous = snapshotTask
         // Both operations start at this key press. A newer request does not
         // cancel capture finalization or discard the older observation batch.
@@ -310,13 +500,21 @@ final class Model: ObservableObject {
         }
         snapshotTask = snapshot
         answerTask = Task {
+            defer {
+                if currentRequest == id {
+                    answerTask = nil
+                    publish()
+                }
+            }
             do {
                 let observation = try await snapshot.value
                 try Task.checkCancellation()
                 guard observation.screenshot != nil, sessionID == session, currentRequest == id
                 else { throw AppFailure.failed }
                 let input = try history.input(through: id)
-                try await chatGPT.answer(input: input, language: language) { [weak self] delta in
+                try await chatGPT.answer(
+                    input: input, language: language, model: model, effort: effort
+                ) { [weak self] delta in
                     guard let self, self.sessionID == session, self.currentRequest == id,
                         let index = self.state.answers.firstIndex(where: { $0.id == id })
                     else { return }
@@ -334,7 +532,7 @@ final class Model: ObservableObject {
                     if let index = state.answers.firstIndex(where: { $0.id == id }) {
                         state.answers[index].status = "failed"
                     }
-                    showError()
+                    showError(error)
                 }
             }
         }
@@ -370,10 +568,21 @@ final class Model: ObservableObject {
         defaults.set(size, forKey: "fontSize")
         publish()
     }
-    private func publish() { do { try relay?.publish(state) } catch { endSession(failed: true) } }
-    private func showError() {
-        error = failureMessage
-        state.error = failureMessage
+    private func publish() {
+        state.canAnswer = canAnswer
+        do { try relay?.publish(state) } catch { endSession(failed: true, error: error) }
+    }
+    func showError(_ cause: Error = AppFailure.failed, catalog: Bool = false) {
+        syncAccount()
+        let failure = cause as? ChatGPTFailure
+        feedback = failure
+        let message =
+            (catalog ? failure?.catalogMessage : failure?.message)
+            ?? (catalog ? "Could not load ChatGPT models. Retry." : failureMessage)
+        error = catalog ? "" : message
+        catalogError = catalog ? message : ""
+        state.error = message
+        state.canAnswer = canAnswer
     }
     private func captureFailed(session: UUID) {
         guard sessionID == session else { return }
@@ -399,6 +608,7 @@ final class Model: ObservableObject {
 
 private struct SettingsView: View {
     @ObservedObject var model: Model
+    @State private var detailsExpanded = false
     let toggleIcon: () -> Void
     var maximumHeight: CGFloat?
     private var microphones: [AVCaptureDevice] {
@@ -409,11 +619,16 @@ private struct SettingsView: View {
     private var answerIndex: Int {
         model.state.answers.firstIndex { $0.id == model.state.selectedID } ?? -1
     }
+    private var feedbackMessages: [String] {
+        [model.error, model.catalogError].filter { !$0.isEmpty }
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             SettingsHeader(
                 status: model.status, working: model.working, live: model.state.live,
-                error: model.error, catalogError: model.catalogError, retry: model.retryModels
+                answering: model.answering,
+                canStart: model.canStartSession,
+                error: model.error, catalogError: model.catalogError, feedback: model.feedback
             )
             .fixedSize(horizontal: false, vertical: true)
             ViewThatFits(in: .vertical) {
@@ -423,21 +638,66 @@ private struct SettingsView: View {
                 }.scrollIndicators(.visible)
             }
             settingsFooter.fixedSize(horizontal: false, vertical: true)
-        }.padding(26).frame(width: 520).frame(maxHeight: maximumHeight)
-            // Size the AppKit window to the content after applying the screen height limit.
-            .fixedSize(horizontal: true, vertical: true)
+        }
+        .onChange(of: feedbackMessages, initial: true) { previous, messages in
+            if previous != messages { detailsExpanded = false }
+            guard !messages.isEmpty else { return }
+            NSAccessibility.post(
+                element: NSApplication.shared, notification: .announcementRequested,
+                userInfo: [
+                    .announcement: messages.joined(separator: " "),
+                    .priority: NSAccessibilityPriorityLevel.high.rawValue,
+                ])
+        }
+        .padding(26).frame(width: 520).frame(maxHeight: maximumHeight)
+        // Size the AppKit window to the content after applying the screen height limit.
+        .fixedSize(horizontal: true, vertical: true)
+    }
+    private var feedbackNotice: some View {
+        let retry: (() -> Void)? =
+            !model.catalogError.isEmpty && model.recovery == .usage
+            ? { model.retryModels() } : nil
+        return SettingsErrorNotice(
+            messages: feedbackMessages,
+            warning: model.feedback?.isWarning ?? false,
+            diagnostic: model.feedback?.diagnostic ?? "",
+            actionTitle: model.recoveryTitle, actionHint: model.recoveryHint,
+            actionDisabled: !model.canRecover, action: model.recover,
+            retryModels: retry, retryModelsDisabled: !model.canRetryModels,
+            detailsExpanded: $detailsExpanded)
     }
     private var settingsContent: some View {
         VStack(alignment: .leading, spacing: 20) {
+            if !feedbackMessages.isEmpty {
+                feedbackNotice
+            }
             VStack(alignment: .leading, spacing: 8) {
                 Text("ChatGPT").font(.headline)
                 if !model.account.isEmpty {
-                    Text(model.account).font(.subheadline).foregroundStyle(.secondary)
+                    Text(model.activeAccountLabel).font(.subheadline).foregroundStyle(.secondary)
+                } else if !model.savedAccounts.isEmpty {
+                    Picker(
+                        "Account",
+                        selection: Binding(
+                            get: { model.selectedAccountID }, set: model.selectAccount)
+                    ) {
+                        ForEach(model.savedAccounts, id: \.clientID) { saved in
+                            Text(model.accountLabel(saved)).tag(saved.clientID)
+                        }
+                        Divider()
+                        Text("Another account").tag("")
+                    }.disabled(!model.canChooseAccount)
                 }
-                Button(
-                    model.account.isEmpty ? "Sign in with ChatGPT" : "Sign out",
-                    action: model.authenticate
-                ).disabled(model.working || model.state.live)
+                HStack(spacing: 12) {
+                    Button(
+                        model.account.isEmpty
+                            ? model.savedAccounts.isEmpty ? "Sign in with ChatGPT" : "Sign in"
+                            : "Sign out",
+                        action: model.authenticate)
+                    if model.needsPlanPermission {
+                        Button("Enable ChatGPT plan usage", action: model.enablePlanUsage)
+                    }
+                }.disabled(!model.canAuthenticate)
             }
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 12) {
@@ -446,11 +706,7 @@ private struct SettingsView: View {
                         selection: Binding(get: { model.modelSlug }, set: model.selectModel)
                     ) {
                         if model.models.isEmpty {
-                            Text(
-                                model.account.isEmpty
-                                    ? "Sign in first"
-                                    : model.working ? "Loading…" : "Unavailable"
-                            ).tag("")
+                            Text(model.modelPlaceholder).tag("")
                         }
                         ForEach(model.models) { Text($0.displayName).tag($0.slug) }
                     }.disabled(!model.canSelectModel)
@@ -459,10 +715,7 @@ private struct SettingsView: View {
                         selection: Binding(get: { model.reasoningEffort }, set: model.selectEffort)
                     ) {
                         if model.selectedModel?.efforts.isEmpty ?? true {
-                            Text(
-                                !model.account.isEmpty && model.working
-                                    ? "Loading…" : "Not available"
-                            ).tag("")
+                            Text(model.effortPlaceholder).tag("")
                         }
                         ForEach(model.selectedModel?.efforts ?? [], id: \.self) {
                             Text($0).tag($0)
@@ -473,14 +726,14 @@ private struct SettingsView: View {
                 Picker("Microphone", selection: $model.microphone) {
                     Text("System default").tag("")
                     ForEach(microphones, id: \.uniqueID) { Text($0.localizedName).tag($0.uniqueID) }
-                }
+                }.disabled(model.working || model.state.live)
                 Picker("Answer language", selection: $model.language) {
                     ForEach(AnswerLanguage.all, id: \.name) { Text($0.label).tag($0.name) }
-                }
+                }.disabled(model.working || model.state.live)
                 LabeledContent("Viewer endpoint") {
                     TextField("https://…", text: $model.relayURL).textFieldStyle(.roundedBorder)
-                }
-            }.disabled(model.working || model.state.live)
+                }.disabled(model.working || model.state.live)
+            }
             if let link = model.link {
                 HStack(spacing: 18) {
                     if let qr = qrCode(link.absoluteString) {
@@ -490,6 +743,10 @@ private struct SettingsView: View {
                     }
                     VStack(alignment: .leading, spacing: 8) {
                         Text(model.viewerStatus).font(.headline)
+                        if !model.viewerDelivery.isEmpty {
+                            Text(model.viewerDelivery).font(.subheadline).foregroundStyle(
+                                .secondary)
+                        }
                         Text("Keep this private session link to yourself.").font(.caption)
                             .foregroundStyle(.secondary)
                         HStack {
@@ -501,8 +758,9 @@ private struct SettingsView: View {
             }
             SettingsControls(
                 live: model.state.live, canAnswer: model.canAnswer,
-                canGoBack: model.canAnswer && answerIndex > 0,
-                canGoForward: model.canAnswer && answerIndex < model.state.answers.count - 1,
+                canGoBack: model.state.live && !model.working && answerIndex > 0,
+                canGoForward: model.state.live && !model.working
+                    && answerIndex < model.state.answers.count - 1,
                 fontSize: model.state.fontSize, answer: model.answer, navigate: model.navigate,
                 scroll: model.scroll, zoom: model.zoom)
         }
@@ -592,7 +850,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 if result == noErr, let reference {
                     shortcuts.append(reference)
                 } else {
-                    model.error = failureMessage
+                    model.showError()
                 }
             }
         }
@@ -619,7 +877,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 Task { @MainActor in delegate.hotkey(id.id, released: released) }
                 return noErr
             }, 2, &events, opaque, nil)
-        if installed != noErr { model.error = failureMessage }
+        if installed != noErr { model.showError() }
         NotificationCenter.default.addObserver(
             self, selector: #selector(screenParametersChanged),
             name: NSApplication.didChangeScreenParametersNotification, object: nil)
