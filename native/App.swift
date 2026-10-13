@@ -910,7 +910,6 @@ private struct SettingsView: View {
     private var settingsFooter: some View {
         HStack {
             Button("Quit", role: .destructive) { NSApp.terminate(nil) }
-                .keyboardShortcut("q", modifiers: .command)
                 .foregroundStyle(.red)
             menuBarIconButton
             Spacer()
@@ -960,6 +959,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var held: Set<UInt32> = []
     private var quitPending = false
     func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.mainMenu = applicationMenu()
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         model.iconVisible = item.isVisible
         if let symbol = NSImage(

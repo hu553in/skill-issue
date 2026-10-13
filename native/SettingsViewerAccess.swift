@@ -69,33 +69,36 @@ struct ViewerAccessConfiguration: View {
                         .help(secretVisible ? "Hide client secret" : "Show client secret")
                     }
                 }
+                .accessibilityElement(children: .contain)
             }
             Text(
-                "Credentials are saved in Keychain. This setting authenticates this Mac; protect the viewer endpoint in Cloudflare."
+                "Use a service token for this Mac and an email policy for browser sign-in. Credentials stay in Keychain."
             ).font(.callout).foregroundStyle(Color(nsColor: SettingsColors.secondaryText))
                 .fixedSize(horizontal: false, vertical: true)
             VStack(alignment: .leading, spacing: 8) {
                 Link(
                     destination: URL(
-                        string: "https://one.dash.cloudflare.com/?to=%2F%3Aaccount%2Faccess%2Fapps")!
+                        string: "https://github.com/hu553in/skill-issue#cloudflare-access")!
                 ) {
-                    Text("Configure Access application")
+                    Text("Read the setup guide")
                         .foregroundStyle(Color(nsColor: SettingsColors.link))
                 }.frame(minHeight: 24, alignment: .leading)
                 Link(
                     destination: URL(
                         string:
-                            "https://one.dash.cloudflare.com/?to=%2F%3Aaccount%2Faccess%2Fservice-auth%2Fservice-tokens"
+                            "https://dash.cloudflare.com/?to=%2F%3Aaccount%2Fone%2Faccess-controls%2Fapps"
                     )!
                 ) {
-                    Text("Create service token")
+                    Text("Open Access applications")
                         .foregroundStyle(Color(nsColor: SettingsColors.link))
                 }.frame(minHeight: 24, alignment: .leading)
                 Link(
                     destination: URL(
-                        string: "https://github.com/hu553in/skill-issue#cloudflare-access")!
+                        string:
+                            "https://dash.cloudflare.com/?to=%2F%3Aaccount%2Fone%2Faccess-controls%2Fservice-credentials%2Fservice-tokens"
+                    )!
                 ) {
-                    Text("Read the Skill Issue setup guide")
+                    Text("Open service tokens")
                         .foregroundStyle(Color(nsColor: SettingsColors.link))
                 }.frame(minHeight: 24, alignment: .leading)
             }.font(.callout)

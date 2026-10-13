@@ -2,16 +2,15 @@
 
 [![CI](https://github.com/hu553in/skill-issue/actions/workflows/ci.yml/badge.svg)](https://github.com/hu553in/skill-issue/actions/workflows/ci.yml)
 
-A macOS menu bar app for interview assistance. It transcribes computer audio and your microphone
-locally. On request, it uses your ChatGPT subscription to answer the current question with context
-from the main display. Read answers on your phone through an encrypted web viewer and control it
-from your Mac.
+A macOS menu bar interview assistant that transcribes computer audio and your microphone locally.
+Request answers through your ChatGPT subscription, using the conversation and a screenshot of your
+main display as context. Read answers on your phone and control the encrypted viewer from your Mac.
 
-Skill Issue is deliberately opinionated and simple, with a small set of controls and predictable
-defaults to keep it **easy to use under interview stress**.
+Skill Issue is opinionated and simple, with few controls and predictable defaults to keep it **easy
+to use under interview stress**.
 
 [Install](#install) | [Viewer endpoint](#viewer-endpoint) | [Usage](#usage) |
-[Data and privacy](#data-and-privacy) | [Development](#development)
+[Recovery](#recovery) | [Data and privacy](#data-and-privacy) | [Development](#development)
 
 ## Install
 
@@ -27,8 +26,10 @@ The app is ad hoc signed without an Apple developer certificate and is not notar
 blocks it, use **System Settings > Privacy & Security > Open Anyway** after attempting to open it;
 see [Apple's instructions](https://support.apple.com/en-us/102445).
 
-Alternatively, remove the quarantine attribute from the downloaded app in Terminal, then open it
-again:
+<details>
+<summary>Remove the download quarantine in Terminal</summary>
+
+Run the command below, then open the app again:
 
 ```sh
 xattr -dr com.apple.quarantine "/Applications/Skill Issue.app"
@@ -36,16 +37,17 @@ xattr -dr com.apple.quarantine "/Applications/Skill Issue.app"
 
 This removes only the quarantine attribute and preserves other extended attributes.
 
+</details>
+
 ## Viewer endpoint
 
-To read answers on your phone, deploy the viewer and relay to your own Cloudflare account. Its usage
-limits and billing apply. The server needs no ChatGPT credentials, tunnels or open ports on your
-Mac.
+**Deploy the viewer and relay to your own Cloudflare account.** Its limits and billing apply. The
+server needs no ChatGPT credentials, tunnels or open ports on your Mac.
 
-Cloudflare Access is optional. Without it, room creation is public and IP-rate-limited: encryption
-protects existing sessions, but anyone who can reach the server can create their own rooms and use
-your deployment's resources. To restrict the whole deployment to your Mac and approved browser
-users, follow [Cloudflare Access](#cloudflare-access).
+Cloudflare Access is optional. Without it, anyone can create rooms and use your deployment's
+resources, subject to IP rate limits. Sessions remain encrypted. Follow
+[Cloudflare Access](#cloudflare-access) to restrict the deployment to your Mac and approved browser
+users.
 
 ### Deploy to Cloudflare
 
@@ -57,19 +59,21 @@ repository into your GitHub account and configures the relay's Durable Object st
 
 Use these build settings:
 
-| Setting                      | Value                                                         |
-| ---------------------------- | ------------------------------------------------------------- |
-| Root directory               | Repository root                                               |
-| Build command                | Leave empty                                                   |
-| Deploy command               | `bun deploy`                                                  |
-| Preview builds               | Disabled                                                      |
-| Preview command              | `true` if the dashboard requires a value                      |
-| Build variable `BUN_VERSION` | The version after `bun@` in `package.json`'s `packageManager` |
+| Setting                      | Value                                                           |
+| ---------------------------- | --------------------------------------------------------------- |
+| Root directory               | Repository root                                                 |
+| Build command                | Leave empty                                                     |
+| Deploy command               | `bun deploy`                                                    |
+| Builds for Preview branches  | Off                                                             |
+| Preview command              | Leave Cloudflare's default; unused while preview builds are off |
+| Build variable `BUN_VERSION` | The version after `bun@` in `package.json`'s `packageManager`   |
 
 `bun deploy` builds the web assets before publishing the Worker. Clear the automatically detected
-Build command because `build` also compiles the macOS app and requires Xcode. Keep preview builds
-disabled; `true` exits without deploying. See Cloudflare's
-[build settings](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/).
+Build command because `build` also compiles the macOS app and requires Xcode.
+
+For an existing Worker, these settings are under **Settings > Builds**. Use the **Production** tab
+for build/deploy commands and `BUN_VERSION`. In **Previews Base**, turn **Builds for Preview
+branches** off. Production-branch pushes still deploy automatically.
 
 ### Deploy from a checkout
 
@@ -86,58 +90,119 @@ session after updating both.
 
 ### Cloudflare Access
 
-Configure Access separately from deploying the Worker. The Deploy to Cloudflare button and
-`bun deploy` publish the same application; neither creates Access policies or service credentials.
+After deploying the Worker, create **one Access application with two separate policies**: email
+sign-in for the browser and a service token for the Mac.
 
-1. Enable Zero Trust in your Cloudflare account. In
-   [Access applications](https://one.dash.cloudflare.com/?to=%2F%3Aaccount%2Faccess%2Fapps), create
-   a **Self-hosted and private** application with a public hostname matching your viewer endpoint.
-   Protect the entire hostname, with no path restriction. Your `workers.dev` address works; a custom
-   domain is optional. Use **hostname-based** protection: Worker-level Access currently rejects
-   WebSocket connections. See
-   [Cloudflare's Workers Access guide](https://developers.cloudflare.com/workers/configuration/cloudflare-access/).
-2. Create an **Allow** policy containing only the email addresses you approve for the browser
-   viewer. Enable **One-time PIN** as a login method to receive a code by email, or use an identity
-   provider you already have configured.
-3. In
-   [Service tokens](https://one.dash.cloudflare.com/?to=%2F%3Aaccount%2Faccess%2Fservice-auth%2Fservice-tokens),
-   create a token for this Mac and copy its **Client ID** and **Client Secret**. Add a **Service
-   Auth** policy to the same application, allowing that specific token. Do not use an Allow or
-   Bypass policy for the Mac token. Cloudflare shows the secret only when it is created; see
-   [service token management](https://developers.cloudflare.com/cloudflare-one/access-controls/service-credentials/service-tokens/).
-4. Protect every hostname that can reach the Worker, or disable the extra routes. If using only a
-   custom domain, disable the unprotected `workers.dev` route and set `workers_dev: false` in your
-   checkout's `wrangler.jsonc` so later deploys keep it disabled. Preview URLs are disabled in the
-   project configuration; keep preview builds disabled in Cloudflare too.
-5. In Skill Issue Settings, set the protected **Viewer endpoint**, enable **Use Cloudflare Access**,
-   choose **Configure**, paste the Client ID and Client Secret, then save. Open the endpoint in your
-   phone browser and sign in before starting your first session. Then open the full session link or
-   scan its QR code. If you first sign in through a QR link and Cloudflare returns to a page asking
-   for the private viewer link, reopen the same link or scan its QR code again. Cloudflare can drop
-   the URL fragment before the viewer has loaded.
+#### 1. Enable email sign-in
 
-The app stores service credentials in Keychain for the exact endpoint. Turning the switch off keeps
-them saved but stops sending them; it does not disable server protection in Cloudflare. Changing the
-endpoint does not send credentials saved for a different server. The switch and Configure are locked
-during a session or operation. When Access is enabled without saved credentials, the app shows
-**Setup required** and prevents Start.
+Open **Zero Trust** in your Cloudflare account and complete its initial setup if needed.
 
-Missing Access credentials and invalid viewer endpoints appear in the shared warning below the app
-title. Missing credentials offer **Configure**; an invalid endpoint explains the accepted address
-format. Setup warnings clear when the configuration is valid; turning Access off also clears the
-missing-credentials warning. Operation errors take priority over setup warnings.
+Open
+[Identity providers](https://dash.cloudflare.com/?to=%2F%3Aaccount%2Fone%2Fintegrations%2Fidentity-providers)
+under **Integrations**. If **One-time PIN** is missing, select **Add an identity provider > One-time
+PIN** and save. This enables login codes by email.
 
-For expired, revoked or denied credentials, fix the token or Service Auth policy and update
-**Configure**. A confirmed Access refusal during a Mac request or reconnection stops the session and
-unlocks Settings; existing answers remain available until the next Start. An already open WebSocket
-does not reauthenticate until it reconnects. Temporary network interruptions continue to reconnect.
-The app never turns Access off or retries without credentials automatically. If browser
-authorization expires, choose **Sign in** in the viewer to authenticate again; the Mac's session
-continues.
+#### 2. Create the Mac's service token
 
-For local development, leave **Use Cloudflare Access** off. Remote endpoints require HTTPS; HTTP is
-accepted only for loopback development addresses. Service credentials are never included in the
-session link, QR code or browser viewer.
+Open
+[Service Tokens](https://dash.cloudflare.com/?to=%2F%3Aaccount%2Fone%2Faccess-controls%2Fservice-credentials%2Fservice-tokens)
+under **Access controls > Service credentials**.
+
+1. Select **Create Service Token**.
+2. Set **Service token name** to `Skill Issue Mac`; leave the default duration.
+3. Select **Generate token** and copy **Client ID** and **Client Secret** for Configure in Skill
+   Issue.
+
+**Copy both now: the secret is shown only once.**
+
+#### 3. Protect the viewer hostname
+
+Open [Applications](https://dash.cloudflare.com/?to=%2F%3Aaccount%2Fone%2Faccess-controls%2Fapps)
+under **Access controls**. Select **Create new application > Self-hosted and private > Public DNS >
+Continue with Self-hosted and private**. To update an existing application, open its name instead.
+
+In **Destinations > Public hostnames**, select **Switch to custom input** and enter the complete
+hostname, for example `skill-issue.example.workers.dev`. **Do not include `https://` or a path.**
+Under **Details**, set **Name** to `Skill Issue`. A custom domain is optional.
+
+**Use Public hostnames, not Add Workers or Worker Access.** Worker-level protection currently
+[blocks the viewer's WebSocket connections](https://developers.cloudflare.com/workers/configuration/cloudflare-access/).
+
+In **Access policies**, use **Create new policy** twice:
+
+| Policy Name           | Action           | Include rule                                 |
+| --------------------- | ---------------- | -------------------------------------------- |
+| `Skill Issue browser` | **Allow**        | **Emails** > each email you allow to sign in |
+| `Skill Issue Mac`     | **Service Auth** | **Service Token** > `Skill Issue Mac`        |
+
+Select **Save policy** after each one. Leave the optional policy settings at their defaults; the MFA
+override stays off. **Both policies must appear in this application's Access policies list.** For
+existing policies, use **Add existing policy** instead of creating duplicates.
+
+Under **Authentication > Identity**, turn **Accept all available identity providers** off and choose
+**One-time PIN**. Finish with **Create**, or **Save** for an existing application.
+
+#### 4. Check the Worker's other addresses
+
+Open [Workers & Pages](https://dash.cloudflare.com/?to=%2F%3Aaccount%2Fworkers-and-pages), then your
+Worker.
+
+- **Domains > Worker URL > Production:** keep it on if this protected `workers.dev` address is your
+  viewer endpoint.
+- **Domains > Worker URL > Preview:** keep it off. The project's `preview_urls: false` preserves
+  this on later deploys.
+- **Settings > Builds > Previews Base > Builds for Preview branches:** keep it off. This does not
+  disable production-branch deploys.
+
+<details>
+<summary>If you use a custom domain or additional routes</summary>
+
+Access protection applies to the hostname you entered, not every address of the same Worker. Check
+**Custom Domains and Routes** in the Worker's **Domains** tab. Add each additional hostname under
+**Destinations > Public hostnames** in the same Access application, or remove the unused route.
+
+If you use only a custom domain, turn **Worker URL > Production** off to disable `workers.dev`. Also
+add `"workers_dev": false` to your checkout's `wrangler.jsonc`; otherwise a later deploy can enable
+it again. Keep **Preview** off separately.
+
+</details>
+
+#### 5. Connect the Mac and phone
+
+1. In Skill Issue Settings, set **Viewer endpoint** to the protected HTTPS address. Turn **Use
+   Cloudflare Access** on, open **Configure**, paste the token's **Client ID** and **Client
+   secret**, then **Save**.
+2. On your phone, open the endpoint without a session link and sign in with an allowed email.
+3. Start a session on the Mac, then open its full link or scan its QR code on the phone.
+
+If Cloudflare sign-in returns you to a page asking for the private viewer link, reopen that same
+link or scan the QR code again. Cloudflare can drop the private part of the link during the first
+login.
+
+<details>
+<summary>Access settings and recovery</summary>
+
+| What you see              | What to do                                                                                        |
+| ------------------------- | ------------------------------------------------------------------------------------------------- |
+| **Setup required** on Mac | Open **Configure** and save the service token before starting a session.                          |
+| Access denied on Mac      | Check the token's expiry and Service Auth policy, update **Configure**, then start a new session. |
+| **Sign in** in the viewer | Sign in again; reopen the session link if needed. The Mac's session continues.                    |
+| Temporary connection loss | Wait for automatic reconnection.                                                                  |
+
+- An Access refusal stops the Mac's session; existing answers remain until the next Start. An
+  already open WebSocket checks Access again only when it reconnects.
+- If you lose the Client Secret,
+  [rotate it in Cloudflare](https://developers.cloudflare.com/cloudflare-one/access-controls/service-credentials/service-tokens/#rotate-service-token-secrets)
+  and update **Configure**.
+- Turning **Use Cloudflare Access** off keeps the credentials but stops sending them. It does not
+  remove the protection in Cloudflare. The app never falls back to unprotected requests
+  automatically.
+- Credentials stay in Keychain for the configured origin. Another endpoint never receives them; they
+  are not included in viewer links or QR codes.
+- Access settings are locked during sessions and operations. For local development, leave Access
+  off; HTTP is accepted only for loopback addresses.
+
+</details>
 
 ## Usage
 
@@ -148,52 +213,35 @@ session link, QR code or browser viewer.
 3. Start a session and allow microphone and screen/system audio access. On first use, the app
    downloads about 642 MB of speech-model files.
 4. Open the session link on your phone or scan its QR code. Keep the browser in the foreground and
-   the phone unlocked; Screen Wake Lock is best effort.
+   the phone unlocked.
 
-Microphone, answer language, viewer endpoint and Cloudflare Access settings are locked while
-listening. Answer language defaults to English and is independent of speech recognition.
+### Settings
 
-**Model** and **Reasoning effort** load from your ChatGPT account after sign-in. The default model
-is `gpt-6-luna`, or the first available model; effort defaults to `low`, or the first supported
-level. Choices are saved between launches. Changing the model resets effort to its default. Both
-selectors stay disabled until choices load; if the catalog supplies no supported effort levels, the
-effort selector stays disabled and the app omits that parameter from requests.
+- **Model and Reasoning effort** load after ChatGPT sign-in. You can change them between requests.
+  Both stay disabled while choices load or an answer is being prepared or generated.
+- **Microphone, Answer language, Viewer endpoint and Cloudflare Access** are locked during sessions
+  and operations.
+- **Answer language** defaults to English and is independent of speech recognition.
 
-If saved accounts cannot be read from Keychain, choose **Retry** before signing in; the app keeps
-the saved registrations untouched.
+<details>
+<summary>Model defaults and saved choices</summary>
 
-If credentials cannot be saved to Keychain, restore Keychain access and choose **Retry**. The
-current session and answers stay available; Retry saves the credentials without requesting another
-answer. If you quit before saving succeeds, you may need to sign in again.
+- The default model is `gpt-6-luna`, or the first available model.
+- Reasoning effort defaults to `low`, or the first supported level. If none are available, the
+  selector stays disabled.
+- Model and effort choices survive app restarts. Changing the model resets effort to its default.
 
-If sign-in succeeds without permission to use your plan, choose **Enable ChatGPT plan usage**. After
-**Sign out**, saved accounts remain available for repeat sign-in. Select a saved **Account** and
-choose **Sign in** to reuse its registration, or select **Another account** to sign in with a
-different account and save its registration. Without saved accounts, choose **Sign in with
-ChatGPT**. Sign-out removes local tokens. If OpenAI cannot confirm remote revocation, the app shows
-a warning and **Open ChatGPT**. To disconnect it, open **Settings > Security and login > Sign in
-with ChatGPT > Skill Issue > Disconnect**.
+</details>
 
-Selecting an account does not start sign-in. The badge shows **Signed out** until you sign in, and
-**Ready** when you can start a session. While an operation runs, it names the operation.
-**Thinking** follows the current request even when you read an earlier answer. Viewer connection
-counts stay separate from control synchronization.
+### ChatGPT accounts
 
-The status badge is beside the app title; errors appear below it with an action when available.
-Temporary failures offer **Retry** or **Request answer**. Usage limits offer **View usage**: check
-your app and plan limits before requesting another answer with the button or shortcut. Requests
-never retry automatically. Existing answers and captured context stay available during recovery. You
-can change the model and reasoning effort between requests without restarting the session; both
-selectors stay disabled while an answer is being prepared or generated. If ChatGPT requires a new
-sign-in or permission to use your plan while listening, the session stops automatically and the
-recovery action becomes available. A new session clears its predecessor's answers and captured
-context.
+When signed out, choose **Sign in with ChatGPT** if no accounts are saved. Otherwise, select an
+**Account** or **Another account**, then choose **Sign in**. Selecting an account does not start
+sign-in.
 
-If a usage limit prevents loading models, choose **View usage** to check your limits, then **Retry**
-to reload the catalog.
-
-**Quit** and **Command + Q** ask for confirmation before stopping the session and closing the app.
-**Cancel** keeps the app and session running.
+To switch accounts, **Sign out** first. Local tokens are removed and account registrations stay
+saved for repeat sign-in. If OpenAI cannot confirm remote sign-out, use
+[account recovery](#account-and-keychain-problems) to disconnect it.
 
 ### Keyboard shortcuts
 
@@ -207,42 +255,83 @@ Hold **Control + Option + Command** for all commands:
 | + / − | Increase / decrease text size, keeping your reading position |
 | H     | Hide / show the app's menu bar icon                          |
 
-The viewer shows one answer at a time. Streaming and reconnects preserve your selected answer and
-reading position. Pressing Space again cancels the current generation and captures fresh context;
-its partial answer remains in history. Holding Space does not repeat requests.
+The viewer shows one answer at a time. Streaming and reconnects preserve your selection and reading
+position. **Thinking** refers to the current request, including when you read an earlier answer.
 
-The viewer reconnects automatically after temporary interruptions. If it cannot connect or reports
-that the connection stopped, reload it or reopen its current link from Skill Issue on your Mac.
+- **Request again:** Space cancels the current generation and captures fresh context. Its partial
+  answer stays in history. Holding Space does not repeat requests.
+- **Text size:** starts at 20, changes by 2 from 16 to 40, and survives app restarts. The +/= key
+  works with or without Shift.
+- **Hide the icon:** H hides the app's icon; macOS capture indicators remain visible. Reopen the app
+  to show Settings when the icon is hidden.
+- **Quit:** the button and Command + Q ask for confirmation. Cancel keeps the session running.
 
-Text size starts at 20, changes by 2 between 16 and 40, and is saved across app restarts. The +/=
-key works with or without Shift. H hides only this app's icon; macOS capture indicators remain
-visible. Reopen the app to show Settings if its icon is hidden.
+**Starting a new session clears the previous session's answers and captured context.**
+
+## Recovery
+
+Answer requests never retry automatically. Existing answers and captured context remain available
+during recovery, until you start a new session.
+
+| Problem                          | What to do                                                                    |
+| -------------------------------- | ----------------------------------------------------------------------------- |
+| Temporary answer failure         | Choose **Retry** or **Request answer**, as offered.                           |
+| ChatGPT usage limit              | Open **View usage**, check your app and plan limits, then **Request answer**. |
+| Usage limit while loading models | Open **View usage**, check your limits, then **Retry** to reload models.      |
+| Viewer connection stopped        | Reload the viewer or reopen the current link from the Mac.                    |
+
+Temporary viewer interruptions reconnect automatically. For Cloudflare sign-in or service-token
+errors, see [Access recovery](#cloudflare-access).
+
+### Account and Keychain problems
+
+- **Plan permission missing:** choose **Enable ChatGPT plan usage**. If ChatGPT requires sign-in or
+  renewed permission during a session, the session stops and shows the recovery action.
+- **Saved accounts unavailable:** choose **Retry** before signing in. Saved registrations stay
+  intact.
+- **Credentials could not be saved:** restore Keychain access, then choose **Retry**. It saves the
+  credentials without requesting another answer. Your session and answers stay available; quitting
+  before the save succeeds may require signing in again.
+- **Remote sign-out unconfirmed:** choose **Open ChatGPT**, then **Settings > Security and login >
+  Sign in with ChatGPT > Skill Issue > Disconnect**.
 
 ## Data and privacy
 
-- ChatGPT tokens and verified account registrations stay in the Mac's Keychain. Requests go directly
-  to OpenAI using your subscription with `store: false`. Model availability and limits depend on
-  [Sign in with ChatGPT](https://developers.openai.com/siwc/token-sharing-open-source).
-- Each answer request captures a screenshot and finalizes a batch of captured audio. Chronological
-  transcripts, screenshots and earlier AI suggestions form the request history. Viewing an old
-  answer does not change that context. Audio is not uploaded.
-- One local Nemotron ASR model serves separate computer and microphone streams. These are audio
-  sources, not verified speaker identities. English and Russian were checked; other languages have
-  not been evaluated here.
-- History stays in memory, including after request errors. There is no automatic truncation; long
-  sessions can reach the model's context limit. The app does not save recordings or screenshots to
-  disk. Model files remain cached in `~/Library/Application Support/Skill Issue/Models/`.
-- Viewer snapshots use AES-256-GCM; the key is carried in the link's URL fragment and is never sent
-  to the relay. The relay stores encrypted state. Readers cannot publish state or control the Mac.
-  Anyone with the full link can read the session unless Cloudflare Access additionally restricts
-  browser access. The link remains in browser history. Access service credentials stay in Keychain
-  and are sent only to their configured origin (HTTPS, or loopback HTTP for local development), with
-  redirects blocked.
+### On your Mac
+
+- Audio is transcribed locally by Nemotron and is not uploaded. Computer audio and microphone are
+  separate sources, not verified speaker identities. English and Russian were checked; other
+  languages have not been evaluated here.
+- History stays in memory, including after request errors. Recordings and screenshots are not saved
+  to disk. History is not truncated automatically, so long sessions can fill the model's context
+  window.
+- Model files are cached in `~/Library/Application Support/Skill Issue/Models/`.
+- ChatGPT tokens, verified account registrations and Access service credentials stay in Keychain.
+
+### Sent to OpenAI
+
+The app sends chronological transcripts, screenshots and earlier AI suggestions directly to OpenAI.
+Each answer request adds a screenshot and the latest transcripts. Reading an old answer does not
+change that context.
+
+Requests use your ChatGPT subscription with `store: false`. Model availability and limits depend on
+[Sign in with ChatGPT](https://developers.openai.com/siwc/token-sharing-open-source).
+
+### Stored by the viewer and relay
+
+- The relay stores AES-256-GCM encrypted state. The decryption key is in the link's URL fragment and
+  is never sent to the relay. Readers cannot publish state or control the Mac.
+- **Anyone with the full link can read the session**, unless Cloudflare Access restricts browser
+  access. The link remains in browser history.
+- The browser saves reading positions, not answer text. During Access sign-in, the tab temporarily
+  saves the private viewer link to restore it after login.
 - Stop, Quit and fatal session errors stop capture and request room deletion. Failed deletion shows
-  an error; an abandoned room expires after two hours without publisher activity. Active sessions
-  renew it. The browser stores reading positions, not answer text. During Cloudflare Access sign-in,
-  the tab also temporarily stores the private viewer link to restore its fragment afterward. There
-  are no analytics or third-party page assets.
+  an error. Abandoned rooms expire after two hours without publisher activity; active sessions renew
+  them.
+
+Access credentials are sent only to their configured origin, using HTTPS or loopback HTTP, with
+redirects blocked. They are not included in session links or QR codes. The viewer has no analytics
+or third-party page assets.
 
 ## Development
 
@@ -272,9 +361,10 @@ In another terminal, build and launch the app:
 bun run:swift
 ```
 
-Use `http://127.0.0.1:8787` as **Viewer endpoint**. The launch command waits for a running session
-to stop before replacing its debug bundle. For VS Code debugging, select **Attach to Skill Issue**
-and choose the running `SkillIssue` process.
+Use `http://127.0.0.1:8787` as **Viewer endpoint**. If the app is already running, confirm **Quit**
+when prompted. The command waits for cleanup before replacing and relaunching the debug app.
+
+For VS Code debugging, select **Attach to Skill Issue** and choose the running `SkillIssue` process.
 
 ### Build and package
 
@@ -282,10 +372,13 @@ and choose the running `SkillIssue` process.
 bun build:release
 ```
 
-This creates `dist/release/Skill Issue.app` and `dist/Skill-Issue-macos-arm64.zip`. CI runs the same
-command as part of the Swift checks and uploads the ZIP after they pass. For a debug bundle, use
-`bun build:swift`; its output is `dist/debug/Skill Issue.app`. Both packaging commands include
-dependency license notices and do not launch the app.
+Outputs:
+
+- App: `dist/release/Skill Issue.app`.
+- ZIP: `dist/Skill-Issue-macos-arm64.zip`, also uploaded by CI after the Swift checks pass.
+
+For a debug bundle, run `bun build:swift`; the output is `dist/debug/Skill Issue.app`. Both commands
+include dependency license notices and do not launch the app.
 
 ### Checks
 
@@ -304,16 +397,20 @@ Markdown and configuration files. Shell scripts use shfmt and ShellCheck.
 | `bun test:sanitize` | Run Swift tests with Thread Sanitizer                                                      |
 
 The pre-commit hook runs `check:fix`; commit messages use Conventional Commits. CI runs the web,
-Swift and sanitizer checks. Integration tests use a disposable local Worker without ChatGPT
-credentials or capture permissions. Native integration checks CryptoKit/WebCrypto interoperability
-through the relay. Automated tests do not exercise real capture, a live ChatGPT account or
-physical-phone Safari. Coverage reports go into `coverage/`.
+Swift and sanitizer checks. Coverage reports go into `coverage/`.
+
+Integration tests use a disposable local Worker without ChatGPT credentials or capture permissions.
+Native integration tests check CryptoKit/WebCrypto interoperability through the relay. Real capture,
+a live ChatGPT account and physical-phone Safari are not covered by automated tests.
 
 ### Speech-model validation
 
-The optional real-model test needs WAV clips of at most 12 seconds: `en_constraints.wav` containing
-"do not sort" and "not the values", and `ru_constraints.wav` containing "сортировать нельзя" and "а
-не сами значения". Clips are resampled to 16 kHz:
+For the optional real-model test, prepare WAV clips of at most 12 seconds:
+
+- `en_constraints.wav`: include "do not sort" and "not the values".
+- `ru_constraints.wav`: include "сортировать нельзя" and "а не сами значения".
+
+Clips are resampled to 16 kHz. Run:
 
 ```sh
 SKILL_ISSUE_ASR_CHECK_DIR=/path/to/fixtures bun test:asr
@@ -332,9 +429,12 @@ bun run:swift --logs
 bun run:swift --telemetry
 ```
 
-Both rebuild and relaunch the debug app. `--logs` follows stdout/stderr in `dist/app.log`;
-`--telemetry` follows system logs for the app's subsystem. Use `--debug` to start under LLDB or
-`--verify` to launch and check that the process is running.
+Both commands rebuild and relaunch the debug app:
+
+- `--logs` follows stdout/stderr in `dist/app.log`.
+- `--telemetry` follows system logs for the app's subsystem.
+- `--debug` starts under LLDB instead.
+- `--verify` launches the app and checks that its process is running.
 
 Rebuilding an ad hoc signed app can require Keychain and screen approval again. If screen access
 remains denied, remove its old entry in **System Settings > Privacy & Security > Screen & System
