@@ -1,3 +1,4 @@
+import { base64urlnopad } from "@scure/base";
 import ReconnectingWebSocket from "partysocket/ws";
 import {
   useCallback,
@@ -8,12 +9,18 @@ import {
 } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { createRoot } from "react-dom/client";
+import { parse } from "valibot";
 
 import answerLanguages from "../native/Resources/answer-languages.json";
 import { parseViewerMessage } from "../protocol";
 import type { ViewState } from "../protocol";
 import { Answer } from "./Answer";
-import { readingAnchor, restoreAnchor, scrollPage } from "./reading";
+import {
+  readingAnchor,
+  ReadingPositionsSchema,
+  restoreAnchor,
+  scrollPage,
+} from "./reading";
 import type { Anchor } from "./reading";
 import {
   acknowledgment,
@@ -21,7 +28,8 @@ import {
   empty,
   failure,
   parseLink,
-  unbase64,
+  rememberAccessLink,
+  viewerFragment,
 } from "./session";
 
 import "./style.css";
@@ -35,6 +43,7 @@ const restartGuide =
   "Start a new session on your Mac and open its viewer link.";
 const connectionGuide =
   "Reload this viewer, or reopen it from Skill Issue on your Mac.";
+const signInRequired = "Sign in required";
 const App = () => {
   const [update, setUpdate] = useState<Update>({
     applied: () => {
@@ -46,8 +55,11 @@ const App = () => {
   const { state } = update;
   const [status, setStatus] = useState("Connecting…");
   const keepAwake =
-    state.live && status !== "Session ended" && status !== failure;
-  const [fragment, setFragment] = useState(() => location.hash);
+    state.live &&
+    status !== "Session ended" &&
+    status !== failure &&
+    status !== signInRequired;
+  const [fragment, setFragment] = useState(viewerFragment);
   const pane = useRef<HTMLElement>(null);
   const anchors = useRef(new Map<string, Anchor>());
   const active = useRef("");
@@ -93,11 +105,10 @@ const App = () => {
     selected.current = null;
     setSelectedID(null);
     try {
-      // This viewer owns the saved tuple format; unreadable storage is ignored.
-      // oxlint-disable-next-line typescript/no-unsafe-type-assertion
-      const cached = JSON.parse(
-        sessionStorage.getItem(memoryKey.current) ?? "[]"
-      ) as [string, Anchor][];
+      const cached = parse(
+        ReadingPositionsSchema,
+        JSON.parse(sessionStorage.getItem(memoryKey.current) ?? "[]")
+      );
       anchors.current = new Map(cached);
     } catch {
       /* Ignore damaged position cache. */
@@ -124,12 +135,52 @@ const App = () => {
     let highest = 0;
     let started = Date.now();
     let lastReceived = started;
+    let accessProbe: AbortController | undefined;
+    async function checkAccess() {
+      // Failed upgrades belong to the same interruption. Let one bounded probe
+      // finish; only a restored socket or a new viewer link makes it stale.
+      if (accessProbe) {
+        return;
+      }
+      const probe = new AbortController();
+      accessProbe = probe;
+      try {
+        // The root is an existing asset, so a denial belongs to deployment
+        // access rather than the room. No session secrets enter this request.
+        const response = await fetch(new URL("/", location.origin), {
+          cache: "no-store",
+          credentials: "same-origin",
+          redirect: "manual",
+          referrerPolicy: "no-referrer",
+          signal: AbortSignal.any([probe.signal, AbortSignal.timeout(5000)]),
+        });
+        if (
+          !disposed &&
+          !ended &&
+          !probe.signal.aborted &&
+          (response.type === "opaqueredirect" ||
+            response.status === 401 ||
+            response.status === 403)
+        ) {
+          generation += 1;
+          ended = true;
+          setStatus(signInRequired);
+          socket?.close();
+        }
+      } catch {
+        /* Offline and temporary server failures retain ordinary reconnect. */
+      } finally {
+        if (accessProbe === probe) {
+          accessProbe = undefined;
+        }
+      }
+    }
     async function connect() {
       try {
         const { room, token, key: rawKey } = parseLink(fragment);
         const key = await crypto.subtle.importKey(
           "raw",
-          unbase64(rawKey),
+          Uint8Array.from(base64urlnopad.decode(rawKey)),
           "AES-GCM",
           false,
           ["decrypt", "encrypt"]
@@ -154,6 +205,7 @@ const App = () => {
         let client = "";
         let first = true;
         ws.addEventListener("open", () => {
+          accessProbe?.abort();
           generation += 1;
           queue = Promise.resolve();
           client = "";
@@ -283,6 +335,7 @@ const App = () => {
             started = Date.now();
           }
           setStatus("Reconnecting…");
+          void checkAccess();
         });
       } catch {
         if (!disposed) {
@@ -323,6 +376,7 @@ const App = () => {
     document.addEventListener("visibilitychange", visibility);
     return () => {
       disposed = true;
+      accessProbe?.abort();
       clearInterval(watchdog);
       document.removeEventListener("visibilitychange", visibility);
       socket?.close();
@@ -418,11 +472,13 @@ const App = () => {
   }
   const index = state.answers.findIndex((answer) => answer.id === selectedID);
   const card = state.answers[index];
+  const hasAnswer = card !== undefined && card.text !== "";
   const answerLanguage = answerLanguages.find(
     (language) => language.name === state.language
   );
   const sessionEnded = status === "Session ended";
-  const viewerFailed = status === failure;
+  const needsSignIn = status === signInRequired;
+  const viewerFailed = status === failure || needsSignIn;
   const listening = status === "Listening";
   const generating =
     listening && state.answers.some((answer) => answer.status === "generating");
@@ -431,6 +487,12 @@ const App = () => {
   const answerPosition =
     index === -1 ? "No answers yet" : `${index + 1} / ${state.answers.length}`;
   const canRequest = state.canAnswer && listening;
+  let failedAnswerGuide = "Check Settings on your Mac to continue.";
+  if (sessionEnded) {
+    failedAnswerGuide = restartGuide;
+  } else if (canRequest) {
+    failedAnswerGuide = "Request another answer on your Mac.";
+  }
   let answerHeading = "Waiting for your Mac.";
   let answerGuide: ReactNode =
     "Your viewer will update when your Mac is ready.";
@@ -474,16 +536,47 @@ const App = () => {
           {shownStatus}
         </output>
       </div>
-      {viewerFailed && card !== undefined && card.text !== "" && (
+      {needsSignIn ? (
         <p className="error connection-error" role="alert">
-          The viewer connection stopped. {connectionGuide}
+          Sign in with an account allowed to open this viewer.{" "}
+          <a
+            href={location.href}
+            onAuxClick={(event) => {
+              if (event.button === 1) {
+                rememberAccessLink(fragment);
+              }
+            }}
+            onClick={(event) => {
+              rememberAccessLink(fragment);
+              if (
+                event.button === 0 &&
+                !event.metaKey &&
+                !event.ctrlKey &&
+                !event.altKey &&
+                !event.shiftKey
+              ) {
+                // A same-fragment link would not request the Access gate again.
+                event.preventDefault();
+                location.reload();
+              }
+            }}
+          >
+            Sign in
+          </a>
         </p>
+      ) : (
+        viewerFailed &&
+        hasAnswer && (
+          <p className="error connection-error" role="alert">
+            The viewer connection stopped. {connectionGuide}
+          </p>
+        )
       )}
       <section
         className="reading"
         ref={pane}
         onScroll={save}
-        tabIndex={0}
+        tabIndex={hasAnswer || !needsSignIn ? 0 : undefined}
         aria-label="Answer"
       >
         {state.error && !viewerFailed && (
@@ -495,9 +588,8 @@ const App = () => {
           </p>
         )}
         <article className="answer" lang={answerLanguage?.tag} aria-busy={busy}>
-          {card !== undefined && card.text !== "" ? (
-            <Answer text={card.text} />
-          ) : (
+          {hasAnswer && <Answer text={card.text} />}
+          {!hasAnswer && !needsSignIn && (
             <div className="empty" lang="en">
               <h1 data-anchor="empty-heading">{answerHeading}</h1>
               <p data-anchor="empty-guide">{answerGuide}</p>
@@ -511,7 +603,7 @@ const App = () => {
           )}
           {card?.status === "failed" && !state.error && !viewerFailed && (
             <p className="error" lang="en" data-anchor="error">
-              {failure}
+              Could not complete this answer. {failedAnswerGuide}
             </p>
           )}
         </article>

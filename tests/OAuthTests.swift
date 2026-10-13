@@ -19,11 +19,13 @@ private final class OAuthFixture: @unchecked Sendable {
     private var exchanges: [[String: String]] = []
     private var models = 0
     private var jwksUnavailable = false
+    private var heldIdentityPath: String?
+    private var heldIdentityResponse: OAuthHTTP?
     private var refreshCount = 0
     private var refreshIncludesIdentity = true
     private var revocations: [[String: String]] = []
     private let expiresIn: Int
-    private let refreshExpiresIn: Int
+    private var refreshExpiresIn: Int
     private var identityOnly = false
     private var codeExchangeRejected = false
     private var invalidIdentity: InvalidIdentity?
@@ -74,7 +76,30 @@ private final class OAuthFixture: @unchecked Sendable {
     func setLoadUnavailable(_ unavailable: Bool) { lock.withLock { loadUnavailable = unavailable } }
     func setSaveUnavailable(_ unavailable: Bool) { lock.withLock { saveUnavailable = unavailable } }
     func setJWKSUnavailable(_ unavailable: Bool) { lock.withLock { jwksUnavailable = unavailable } }
-    func omitRefreshIdentity() { lock.withLock { refreshIncludesIdentity = false } }
+    func setRefreshIdentityIncluded(_ included: Bool) {
+        lock.withLock { refreshIncludesIdentity = included }
+    }
+    func setRefreshExpiry(_ seconds: Int) { lock.withLock { refreshExpiresIn = seconds } }
+    func holdIdentityRequest(at path: String) { lock.withLock { heldIdentityPath = path } }
+    var identityRequestPending: Bool { lock.withLock { heldIdentityResponse != nil } }
+    func hold(_ response: OAuthHTTP) -> Bool {
+        lock.withLock {
+            guard let path = heldIdentityPath, path == response.request.url?.path else {
+                return false
+            }
+            heldIdentityPath = nil
+            heldIdentityResponse = response
+            return true
+        }
+    }
+    func finishIdentityRequest(status: Int) {
+        let response = lock.withLock {
+            let response = heldIdentityResponse
+            heldIdentityResponse = nil
+            return response
+        }
+        response?.respond(status: status, body: Data())
+    }
     func expirePendingGrant(identity: Bool) throws {
         try lock.withLock {
             var value = try #require(stored)
@@ -103,7 +128,10 @@ private final class OAuthFixture: @unchecked Sendable {
         }
     }
     func invalidate(_ value: InvalidIdentity?) { lock.withLock { invalidIdentity = value } }
-    func cleanUp() { defaults.removePersistentDomain(forName: defaultsName) }
+    func cleanUp() {
+        finishIdentityRequest(status: 503)
+        defaults.removePersistentDomain(forName: defaultsName)
+    }
 
     func open(_ url: URL) -> Bool {
         guard let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
@@ -253,7 +281,8 @@ private final class OAuthFixture: @unchecked Sendable {
                         !refreshing
                         ? "test-refresh"
                         : rotation == 1 ? "replacement-refresh" : "replacement-refresh-\(rotation)",
-                    "token_type": "Bearer", "expires_in": refreshing ? refreshExpiresIn : expiresIn,
+                    "token_type": "Bearer",
+                    "expires_in": refreshing ? lock.withLock { refreshExpiresIn } : expiresIn,
                     "scope":
                         "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct",
                 ]
@@ -278,6 +307,10 @@ private final class OAuthRoute: @unchecked Sendable {
         let current = try #require(lock.withLock { fixture })
         return try current.response(to: request)
     }
+    func hold(_ response: OAuthHTTP) throws -> Bool {
+        let current = try #require(lock.withLock { fixture })
+        return current.hold(response)
+    }
 }
 
 private final class OAuthHTTP: URLProtocol, @unchecked Sendable {
@@ -286,7 +319,13 @@ private final class OAuthHTTP: URLProtocol, @unchecked Sendable {
     override static func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
         do {
+            if try Self.route.hold(self) { return }
             let (status, body) = try Self.route.response(to: request)
+            respond(status: status, body: body)
+        } catch { client?.urlProtocol(self, didFailWithError: error) }
+    }
+    func respond(status: Int, body: Data) {
+        do {
             let url = try #require(request.url)
             let response = try #require(
                 HTTPURLResponse(
@@ -364,6 +403,97 @@ struct OAuthTests {
         #expect(fixture.account?.pendingSession == nil)
     }
 
+    @Test(arguments: ["/.well-known/openid-configuration", "/test-jwks"], [401, 503])
+    func cancelledIdentityFailureKeepsRotationAndStopsOnlyForTerminalAuthorization(
+        _ path: String, _ status: Int
+    ) async throws {
+        for restarted in [false, true] {
+            let fixture = try OAuthFixture(expiresIn: 1, refreshExpiresIn: 30)
+            let http = session(fixture)
+            defer {
+                http.invalidateAndCancel()
+                OAuthHTTP.route.use(nil)
+                fixture.cleanUp()
+            }
+            let signedIn = ChatGPT(
+                session: http, storage: fixture.storage, defaults: fixture.defaults,
+                openAuthorization: fixture.open)
+            try await signedIn.restore()
+            try await signedIn.signIn()
+            try await fixture.finishCallback()
+            fixture.setRefreshIdentityIncluded(false)
+            let client = ChatGPT(
+                session: http, storage: fixture.storage, defaults: fixture.defaults,
+                openAuthorization: fixture.open)
+            let model = Model(chatGPT: client, defaults: fixture.defaults)
+            try await loaded(model)
+            try #require(model.canStartSession && fixture.modelRequests == 1)
+            model.state.live = true
+            model.state.beginAnswer(id: "retained")
+            model.state.answers[0].text = "Keep this received answer"
+            model.state.answers[0].status = "complete"
+            let answers = model.state.answers
+            let previousIdentity = try #require(client.account?.session?.idToken)
+            fixture.setRefreshIdentityIncluded(true)
+            fixture.setRefreshExpiry(3600)
+            fixture.holdIdentityRequest(at: path)
+            let request = Task {
+                do { _ = try await client.listModels() } catch {
+                    if !Task.isCancelled { model.showError(error) }
+                }
+            }
+            defer { request.cancel() }
+            let deadline = ContinuousClock.now + .seconds(3)
+            while !fixture.identityRequestPending, ContinuousClock.now < deadline {
+                await Task.yield()
+            }
+            try #require(fixture.identityRequestPending)
+            try #require(
+                fixture.account?.pendingSession?.refreshToken == "replacement-refresh-2")
+            request.cancel()
+            fixture.finishIdentityRequest(status: status)
+            await request.value
+            await client.finishPendingRefresh()
+            try await loaded(model)
+            let terminal = status == 401
+            #expect(model.state.live == !terminal && model.canAnswer == !terminal)
+            #expect(model.state.answers == answers && model.account == "test@example.invalid")
+            #expect(model.canAuthenticate == terminal && model.canConfigureViewer == terminal)
+            #expect(fixture.registrations.map(\.subject) == ["test-subject"])
+            #expect(fixture.account?.session?.idToken == previousIdentity)
+            #expect(fixture.account?.session?.refreshToken == "replacement-refresh")
+            #expect(fixture.account?.pendingSession?.refreshToken == "replacement-refresh-2")
+            if terminal {
+                #expect(model.feedback?.status == 401 && model.feedback?.stopsSession == true)
+                #expect(model.feedback?.requestID == "oauth-test-request")
+                #expect(!model.error.isEmpty)
+            } else {
+                #expect(model.feedback == nil && model.error.isEmpty)
+            }
+            let refreshes = fixture.tokenRequests.filter { $0["grant_type"] == "refresh_token" }
+            #expect(
+                refreshes.map { $0["refresh_token"] } == ["test-refresh", "replacement-refresh"])
+            #expect(fixture.modelRequests == 1)
+            let retrying: ChatGPT
+            if restarted {
+                retrying = ChatGPT(
+                    session: http, storage: fixture.storage, defaults: fixture.defaults,
+                    openAuthorization: fixture.open)
+                try await retrying.restore()
+            } else {
+                retrying = client
+            }
+            let models = try await retrying.listModels()
+            #expect(models.map(\.slug) == ["gpt-6-luna"])
+            #expect(fixture.modelRequests == 2 && fixture.tokenRequests.count == 3)
+            #expect(retrying.account?.session?.refreshToken == "replacement-refresh-2")
+            #expect(fixture.account?.pendingSession == nil)
+            #expect(fixture.account?.session?.refreshToken == "replacement-refresh-2")
+            #expect(model.state.answers == answers)
+            await model.shutdown()
+        }
+    }
+
     @Test(arguments: [false, true], [false, true])
     func expiredPendingGrantRefreshesTheLatestTokenBeforeAccess(
         _ expiredIdentity: Bool, _ replacementIdentity: Bool
@@ -390,7 +520,7 @@ struct OAuthTests {
         } catch let failure as ChatGPTFailure { #expect(failure.status == 503) }
         #expect(fixture.modelRequests == 0)
         try fixture.expirePendingGrant(identity: expiredIdentity)
-        if !replacementIdentity { fixture.omitRefreshIdentity() }
+        if !replacementIdentity { fixture.setRefreshIdentityIncluded(false) }
         fixture.setJWKSUnavailable(false)
         let restored = ChatGPT(
             session: http, storage: fixture.storage, defaults: fixture.defaults,
@@ -492,13 +622,69 @@ struct OAuthTests {
         } catch {
             #expect(fixture.modelRequests == 0)
             #expect(chatGPT.account?.subject == "test-subject")
-            #expect(chatGPT.account?.session?.idToken == original.idToken)
-            #expect(chatGPT.account?.session?.accessToken == original.accessToken)
-            #expect(fixture.account?.session?.refreshToken == original.refreshToken)
+            if invalid == .subject {
+                #expect((error as? ChatGPTFailure)?.recovery == .signIn)
+                #expect(chatGPT.account?.session == nil && chatGPT.account?.pendingSession == nil)
+                #expect(fixture.account?.session == nil && fixture.account?.pendingSession == nil)
+            } else {
+                #expect(chatGPT.account?.session?.idToken == original.idToken)
+                #expect(chatGPT.account?.session?.accessToken == original.accessToken)
+                #expect(fixture.account?.session?.refreshToken == original.refreshToken)
+            }
         }
         #expect(try await chatGPT.signOut())
-        #expect(fixture.revocationRequests.map { $0["token"] } == ["replacement-refresh"])
+        #expect(
+            fixture.revocationRequests.map { $0["token"] }
+                == (invalid == .subject ? [] : ["replacement-refresh"]))
         #expect(chatGPT.registrations.map(\.subject) == ["test-subject"])
+    }
+
+    @Test func refreshedSubjectMismatchStopsLiveAndCannotReuseTheGrantAfterRestart() async throws {
+        let fixture = try OAuthFixture(expiresIn: 1, refreshExpiresIn: 1)
+        let http = session(fixture)
+        defer {
+            http.invalidateAndCancel()
+            OAuthHTTP.route.use(nil)
+            fixture.cleanUp()
+        }
+        let client = ChatGPT(
+            session: http, storage: fixture.storage, defaults: fixture.defaults,
+            openAuthorization: fixture.open)
+        try await client.restore()
+        try await client.signIn()
+        try await fixture.finishCallback()
+        let model = Model(chatGPT: client, defaults: fixture.defaults)
+        try await loaded(model)
+        try #require(model.canStartSession)
+        model.state.live = true
+        model.state.beginAnswer(id: "retained")
+        model.state.answers[0].text = "Keep this received answer"
+        model.state.answers[0].status = "complete"
+        let answers = model.state.answers
+        fixture.invalidate(.subject)
+        do {
+            _ = try await client.listModels()
+            Issue.record("A refreshed identity for another account was accepted")
+        } catch {}
+        try await loaded(model)
+        #expect(!model.state.live && !model.canAnswer && model.state.answers == answers)
+        #expect(model.account.isEmpty && client.account?.session == nil)
+        #expect(model.recovery == .signIn && model.canRecover && model.canAuthenticate)
+        #expect(fixture.account?.session == nil && fixture.account?.pendingSession == nil)
+        #expect(fixture.registrations.map(\.subject) == ["test-subject"])
+        let exchanges = fixture.tokenRequests.count
+        let restarted = ChatGPT(
+            session: http, storage: fixture.storage, defaults: fixture.defaults,
+            openAuthorization: fixture.open)
+        try await restarted.restore()
+        do {
+            _ = try await restarted.listModels()
+            Issue.record("A rejected refreshed identity was reused after restart")
+        } catch let failure as ChatGPTFailure {
+            #expect(failure.recovery == .signIn)
+        } catch { Issue.record("Rejected credentials did not offer sign-in after restart") }
+        #expect(fixture.tokenRequests.count == exchanges && fixture.modelRequests == 1)
+        await model.shutdown()
     }
 
     @Test(arguments: [false, true])

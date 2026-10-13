@@ -1,8 +1,9 @@
 import type { Locator, WebSocketRoute } from "@playwright/test";
+import { base64 } from "@scure/base";
 
 import { parseViewerMessage } from "../../protocol";
 import type { ViewState } from "../../protocol";
-import { empty, failure, unbase64 } from "../../web/session";
+import { empty, failure } from "../../web/session";
 import { RelaySession } from "../relay";
 import { expect, test } from "./fixtures";
 
@@ -12,7 +13,7 @@ async function decryptAcknowledgment(
   relay: RelaySession,
   ack: { box: string; client: string; seq: number }
 ): Promise<unknown> {
-  const bytes = unbase64(ack.box);
+  const bytes = base64.decode(ack.box);
   const plaintext = await crypto.subtle.decrypt(
     {
       additionalData: new TextEncoder().encode(
@@ -334,6 +335,580 @@ test("a transient initial connection can establish before its deadline and remai
   await page.clock.fastForward(20_000);
   await expect(page.getByRole("status")).toHaveText("Listening");
   expect(sockets.length).toBe(2);
+});
+
+for (const deniedStatus of [302, 401, 403]) {
+  test(`Cloudflare Access HTTP ${deniedStatus} preserves the answer and offers sign-in without leaking the viewer link`, async ({
+    page,
+    relay,
+  }) => {
+    let denied = false;
+    const sockets: WebSocketRoute[] = [];
+    const probes: string[] = [];
+    await page.route("**/", async (route) => {
+      const request = route.request();
+      if (request.resourceType() === "fetch") {
+        probes.push(request.url());
+        expect(request.headers()["referer"]).toBeUndefined();
+        expect(request.headers()["cookie"]).toContain(
+          "CF_Authorization=fixture-access-cookie"
+        );
+        await route.fulfill({
+          headers:
+            deniedStatus === 302
+              ? { Location: "https://access.example.invalid/login" }
+              : {},
+          status: deniedStatus,
+        });
+      } else {
+        await route.continue();
+      }
+    });
+    await page.routeWebSocket("**/rooms/*/socket", (socket) => {
+      sockets.push(socket);
+      if (denied) {
+        void socket.close({ code: 1001, reason: "Access requires sign-in" });
+      } else {
+        socket.connectToServer();
+      }
+    });
+    const text = Array.from(
+      { length: 60 },
+      (_, index) => `Paragraph ${index}. Keep reading during sign-in.`
+    ).join("\n\n");
+    await relay.publish({
+      ...empty,
+      answers: [{ id: "a", status: "complete", text }],
+      canAnswer: true,
+      live: true,
+      selectedID: "a",
+    });
+    const url = await relay.viewerURL();
+    await page.context().addCookies([
+      {
+        name: "CF_Authorization",
+        url: new URL(url).origin,
+        value: "fixture-access-cookie",
+      },
+    ]);
+    await page.goto(url);
+    await expect(page.getByRole("status")).toHaveText("Listening");
+    const pane = page.getByRole("region", { exact: true, name: "Answer" });
+    await pane.evaluate((element) => {
+      element.scrollTop = 700;
+      element.dispatchEvent(new Event("scroll"));
+    });
+    const before = await position(pane);
+    const [first] = sockets;
+    if (!first) {
+      throw new Error("The viewer did not establish its initial connection");
+    }
+    denied = true;
+    await first.close({ code: 1001, reason: "Access cookie expired" });
+    await expect(page.getByRole("status")).toHaveText("Sign in required");
+    await expect(page.getByRole("alert")).toContainText(
+      "Sign in with an account allowed to open this viewer."
+    );
+    const action = page.getByRole("link", { exact: true, name: "Sign in" });
+    await expect(action).toHaveAttribute("href", url);
+    await expect(pane.locator("article")).toContainText("Paragraph 40");
+    await expect.poll(async () => await position(pane)).toBeCloseTo(before, 0);
+    await expect(page.locator("footer")).toHaveCount(0);
+    expect(probes).toEqual([`${new URL(url).origin}/`]);
+    expect(probes.join(" ")).not.toContain(relay.room.reader);
+    expect(probes.join(" ")).not.toContain(new URL(url).hash);
+    const count = sockets.length;
+    await page.clock.install();
+    await page.clock.fastForward(60_000);
+    expect(sockets.length).toBe(count);
+    await page.clock.resume();
+
+    // A plain click must request the document, not just navigate to its fragment.
+    let navigations = 0;
+    page.on("request", (request) => {
+      if (request.isNavigationRequest()) {
+        navigations += 1;
+      }
+    });
+    denied = false;
+    await action.focus();
+    await expect(action).toBeFocused();
+    await expect(action).toHaveCSS("outline-style", "solid");
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("status")).toHaveText("Listening");
+    expect(navigations).toBe(1);
+    expect(page.url()).toBe(url);
+    await expect.poll(async () => await position(pane)).toBeCloseTo(before, 0);
+  });
+}
+
+for (const viewport of [
+  { height: 844, textSize: 16, width: 390 },
+  { height: 390, textSize: 16, width: 844 },
+  { height: 800, textSize: 16, width: 1280 },
+  { height: 568, textSize: 32, width: 320 },
+]) {
+  for (const access of [false, true]) {
+    test(`${access ? "Access" : "Transport"} error keeps clearance and the visible reading anchor at ${viewport.width}px with ${viewport.textSize / 16}x text`, async ({
+      page,
+      relay,
+    }) => {
+      await page.setViewportSize(viewport);
+      await page.route("**/", async (route) => {
+        await (route.request().resourceType() === "fetch"
+          ? route.fulfill({ status: 403 })
+          : route.continue());
+      });
+      const sockets: WebSocketRoute[] = [];
+      await page.routeWebSocket("**/rooms/*/socket", (socket) => {
+        sockets.push(socket);
+        socket.connectToServer();
+      });
+      await relay.publish({
+        ...empty,
+        answers: [
+          {
+            id: "a",
+            status: "incomplete",
+            text: Array.from(
+              { length: 100 },
+              (_, index) =>
+                `Paragraph ${index}. This answer stays readable after the viewer connection stops.`
+            ).join("\n\n"),
+          },
+        ],
+        canAnswer: true,
+        live: true,
+        selectedID: "a",
+      });
+      await page.goto(await relay.viewerURL());
+      await expect(page.getByRole("status")).toHaveText("Listening");
+      await page.evaluate((size) => {
+        document.documentElement.style.fontSize = `${size}px`;
+      }, viewport.textSize);
+      const pane = page.getByRole("region", { exact: true, name: "Answer" });
+      await pane.evaluate((element) => {
+        element.scrollTop = 700;
+        element.dispatchEvent(new Event("scroll"));
+      });
+      const before = await visibleAnchor(pane);
+      if (!before) {
+        throw new Error("The answer has no visible reading anchor");
+      }
+      const [socket] = sockets;
+      if (!socket) {
+        throw new Error("The viewer did not establish its initial connection");
+      }
+      await socket.close({
+        code: access ? 1001 : 1008,
+        reason: "Viewer connection stopped",
+      });
+      await expect(page.getByRole("status")).toHaveText(
+        access ? "Sign in required" : failure
+      );
+      const notice = page.getByRole("alert");
+      await expect(notice).toBeVisible();
+      const clearance = async () => {
+        const noticeBox = await notice.boundingBox();
+        const paneBox = await pane.boundingBox();
+        if (!noticeBox || !paneBox) {
+          throw new Error("The error or reading viewport is not visible");
+        }
+        return paneBox.y - (noticeBox.y + noticeBox.height);
+      };
+      expect(await clearance()).toBeGreaterThanOrEqual(12);
+      expect(
+        await pane.evaluate((element) => element.clientHeight)
+      ).toBeGreaterThan(100);
+      await expect
+        .poll(async () => {
+          const anchor = await visibleAnchor(pane);
+          return anchor?.id;
+        })
+        .toBe(before.id);
+      const after = await visibleAnchor(pane);
+      expect(after?.offset).toBeCloseTo(before.offset, 1);
+      await pane.evaluate((element) => {
+        element.scrollTop += 200;
+        element.dispatchEvent(new Event("scroll"));
+      });
+      expect(await clearance()).toBeGreaterThanOrEqual(12);
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth)
+      ).toBe(viewport.width);
+      await expect(
+        pane.getByText("Incomplete answer", { exact: true })
+      ).toHaveCount(1);
+      await expect(notice).not.toContainText("Incomplete answer");
+      await expect(page.getByRole("link", { name: "Sign in" })).toHaveCount(
+        access ? 1 : 0
+      );
+    });
+  }
+}
+
+test("explicit Access sign-in restores the private fragment when login returns without it", async ({
+  page,
+  relay,
+}) => {
+  let denied = false;
+  let login = false;
+  const sockets: WebSocketRoute[] = [];
+  const navigations: string[] = [];
+  page.on("request", (request) => {
+    if (request.isNavigationRequest()) {
+      navigations.push(request.url());
+    }
+  });
+  await page.route("**/", async (route) => {
+    const request = route.request();
+    if (request.resourceType() === "fetch" && denied) {
+      await route.fulfill({ status: 403 });
+    } else if (request.isNavigationRequest() && login) {
+      login = false;
+      await route.fulfill({
+        body: '<!doctype html><script>location.replace("/")</script>',
+        contentType: "text/html",
+      });
+    } else {
+      await route.continue();
+    }
+  });
+  await page.routeWebSocket("**/rooms/*/socket", (socket) => {
+    sockets.push(socket);
+    socket.connectToServer();
+  });
+  const text = Array.from(
+    { length: 60 },
+    (_, index) => `Paragraph ${index}. Retain this encrypted answer.`
+  ).join("\n\n");
+  await relay.publish({
+    ...empty,
+    answers: [{ id: "saved", status: "complete", text }],
+    live: true,
+    selectedID: "saved",
+  });
+  const url = await relay.viewerURL();
+  await page.goto(url);
+  await expect(page.getByRole("status")).toHaveText("Listening");
+  expect(
+    await page.evaluate(() => sessionStorage.getItem("skill-issue:access-link"))
+  ).toBeNull();
+  const pane = page.getByRole("region", { exact: true, name: "Answer" });
+  await pane.evaluate((element) => {
+    element.scrollTop = 700;
+    element.dispatchEvent(new Event("scroll"));
+  });
+  const before = await position(pane);
+  const [first] = sockets;
+  if (!first) {
+    throw new Error("The viewer did not establish its initial connection");
+  }
+  denied = true;
+  await first.close({ code: 1001, reason: "Access cookie expired" });
+  await expect(page.getByRole("status")).toHaveText("Sign in required");
+  denied = false;
+  login = true;
+  await page.getByRole("link", { exact: true, name: "Sign in" }).click();
+  await expect(page.getByRole("status")).toHaveText("Listening");
+  expect(page.url()).toBe(url);
+  await expect(pane.locator("article")).toContainText("Paragraph 40");
+  await expect.poll(async () => await position(pane)).toBeCloseTo(before, 0);
+  expect(
+    await page.evaluate(() => sessionStorage.getItem("skill-issue:access-link"))
+  ).toBeNull();
+  expect(navigations).toEqual(
+    Array.from({ length: 3 }, () => `${new URL(url).origin}/`)
+  );
+});
+
+test("pending Access sign-in never overrides a fresh viewer link and malformed fragments are consumed", async ({
+  page,
+  relay,
+}) => {
+  const url = await relay.viewerURL();
+  await relay.publish({
+    ...empty,
+    answers: [{ id: "fresh", status: "complete", text: "The fresh session." }],
+    live: true,
+    selectedID: "fresh",
+  });
+  await page.goto("/");
+  const old = `#${crypto.randomUUID()}.${"A".repeat(43)}.${"B".repeat(43)}`;
+  await page.evaluate((fragment) => {
+    sessionStorage.setItem("skill-issue:access-link", fragment);
+  }, old);
+  await page.goto(url);
+  // Same-origin fragment navigation does not remount the app. Exercise the
+  // document load that follows an Access login as well.
+  await page.reload();
+  await expect(page.getByRole("status")).toHaveText("Listening");
+  await expect(page.locator("article")).toContainText("The fresh session.");
+  expect(page.url()).toBe(url);
+  expect(
+    await page.evaluate(() => sessionStorage.getItem("skill-issue:access-link"))
+  ).toBeNull();
+  let sockets = 0;
+  page.on("websocket", () => {
+    sockets += 1;
+  });
+  await page.evaluate(() => {
+    sessionStorage.setItem("skill-issue:access-link", "#broken");
+  });
+  await page.goto("/");
+  await page.reload();
+  await expect(
+    page.getByRole("heading", { exact: true, name: "Skill Issue" })
+  ).toBeVisible();
+  expect(new URL(page.url()).hash).toBe("");
+  expect(sockets).toBe(0);
+  expect(
+    await page.evaluate(() => sessionStorage.getItem("skill-issue:access-link"))
+  ).toBeNull();
+});
+
+test("Access sign-in without browser storage falls back to reopening the original viewer link", async ({
+  page,
+  relay,
+}) => {
+  let denied = false;
+  let login = false;
+  const sockets: WebSocketRoute[] = [];
+  const errors: Error[] = [];
+  page.on("pageerror", (error) => errors.push(error));
+  await page.addInitScript(() => {
+    Storage.prototype.setItem = () => {
+      throw new DOMException("Browser storage is blocked", "SecurityError");
+    };
+  });
+  await page.route("**/", async (route) => {
+    if (route.request().resourceType() === "fetch" && denied) {
+      await route.fulfill({ status: 403 });
+    } else if (route.request().isNavigationRequest() && login) {
+      login = false;
+      await route.fulfill({
+        body: '<!doctype html><script>location.replace("/")</script>',
+        contentType: "text/html",
+      });
+    } else {
+      await route.continue();
+    }
+  });
+  await page.routeWebSocket("**/rooms/*/socket", (socket) => {
+    sockets.push(socket);
+    socket.connectToServer();
+  });
+  await relay.publish({ ...empty, live: true });
+  const url = await relay.viewerURL();
+  await page.goto(url);
+  await expect(page.getByRole("status")).toHaveText("Listening");
+  const [first] = sockets;
+  if (!first) {
+    throw new Error("The viewer did not establish its initial connection");
+  }
+  denied = true;
+  await first.close({ code: 1001, reason: "Access cookie expired" });
+  await expect(page.getByRole("status")).toHaveText("Sign in required");
+  denied = false;
+  login = true;
+  await page.getByRole("link", { exact: true, name: "Sign in" }).click();
+  await expect(
+    page.getByRole("heading", { exact: true, name: "Skill Issue" })
+  ).toBeVisible();
+  await expect(
+    page.getByText("Open the private viewer link", { exact: false })
+  ).toBeVisible();
+  expect(errors).toEqual([]);
+  await page.goto(url);
+  await expect(page.getByRole("status")).toHaveText("Listening");
+  expect(errors).toEqual([]);
+});
+
+test("Access sign-in before the first snapshot has a usable empty state at 320px and 200% text", async ({
+  page,
+  relay,
+}) => {
+  await page.route("**/", async (route) => {
+    await (route.request().resourceType() === "fetch"
+      ? route.fulfill({ status: 403 })
+      : route.continue());
+  });
+  await page.routeWebSocket("**/rooms/*/socket", async (socket) => {
+    await socket.close({ code: 1001, reason: "Access requires sign-in" });
+  });
+  const url = await relay.viewerURL();
+  await page.goto(url);
+  await expect(page.getByRole("status")).toHaveText("Sign in required");
+  await expect(page.getByRole("alert")).toContainText(
+    "Sign in with an account allowed to open this viewer."
+  );
+  await expect(
+    page.getByText("Sign in with an account allowed to open this viewer.", {
+      exact: false,
+    })
+  ).toHaveCount(1);
+  await expect(page.getByRole("heading")).toHaveCount(0);
+  await expect(
+    page.getByRole("region", { exact: true, name: "Answer" })
+  ).toHaveText("");
+  const action = page.getByRole("link", { exact: true, name: "Sign in" });
+  await expect(action).toHaveCount(1);
+  await expect(action).toHaveAttribute("href", url);
+  await page.setViewportSize({ height: 568, width: 320 });
+  await page.evaluate(() => {
+    document.documentElement.style.fontSize = "32px";
+  });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(
+    320
+  );
+  const actionBox = await action.boundingBox();
+  if (!actionBox) {
+    throw new Error("The sign-in action is not visible");
+  }
+  expect(actionBox.height).toBeGreaterThanOrEqual(24);
+  expect(actionBox.width).toBeGreaterThanOrEqual(24);
+  expect(actionBox.y + actionBox.height).toBeLessThan(568);
+  await page.keyboard.press("Tab");
+  await expect(action).toBeFocused();
+  await expect(action).toHaveCSS("outline-style", "solid");
+  expect(relay.writer.socket.readyState).toBe(WebSocket.OPEN);
+});
+
+test("temporary probe failures do not turn a transport interruption into an Access error", async ({
+  page,
+  relay,
+}) => {
+  const sockets: WebSocketRoute[] = [];
+  let probeCount = 0;
+  let resume = false;
+  await page.route("**/", async (route) => {
+    if (route.request().resourceType() !== "fetch") {
+      await route.continue();
+      return;
+    }
+    probeCount += 1;
+    await (probeCount === 1
+      ? route.abort("internetdisconnected")
+      : route.fulfill({ status: 503 }));
+  });
+  await page.routeWebSocket("**/rooms/*/socket", (socket) => {
+    sockets.push(socket);
+    if (sockets.length === 1 || resume) {
+      socket.connectToServer();
+    } else {
+      void socket.close({ code: 1001, reason: "Temporary interruption" });
+    }
+  });
+  await relay.publish({ ...empty, live: true });
+  await page.goto(await relay.viewerURL());
+  await expect(page.getByRole("status")).toHaveText("Listening");
+  const [first] = sockets;
+  if (!first) {
+    throw new Error("The viewer did not establish its initial connection");
+  }
+  await first.close({ code: 1001, reason: "Temporary interruption" });
+  await expect.poll(() => probeCount).toBeGreaterThanOrEqual(2);
+  await expect(page.getByRole("status")).toHaveText("Reconnecting…");
+  await expect(page.getByRole("link", { name: "Sign in" })).toHaveCount(0);
+  resume = true;
+  await expect(page.getByRole("status")).toHaveText("Listening");
+});
+
+test("a slow Access denial survives repeated rejected WebSocket upgrades", async ({
+  page,
+  relay,
+}) => {
+  let rejections = 0;
+  const probes: (() => Promise<void>)[] = [];
+  page.on("websocket", (socket) => {
+    socket.on("socketerror", () => {
+      rejections += 1;
+    });
+  });
+  await page.route("**/", async (route) => {
+    if (route.request().resourceType() !== "fetch") {
+      await route.continue();
+      return;
+    }
+    probes.push(async () => {
+      await route.fulfill({ status: 403 }).catch(() => {
+        /* The test observes whether a reconnect cancelled this response. */
+      });
+    });
+  });
+  const url = new URL(await relay.viewerURL());
+  const fragment = url.hash.split(".");
+  fragment[1] = `${relay.room.reader.startsWith("A") ? "B" : "A"}${relay.room.reader.slice(1)}`;
+  url.hash = fragment.join(".");
+  await page.goto(url.href);
+  await expect.poll(() => probes.length).toBeGreaterThan(0);
+  // Actual HTTP upgrade rejections never emit open, unlike a mocked socket close.
+  await expect.poll(() => rejections).toBeGreaterThanOrEqual(2);
+  const [denied] = probes;
+  if (!denied) {
+    throw new Error("The viewer did not check deployment access");
+  }
+  await denied();
+  await expect(page.getByRole("status")).toHaveText("Sign in required");
+  await expect(page.getByRole("link", { name: "Sign in" })).toBeVisible();
+  expect(probes).toHaveLength(1);
+});
+
+test("a stale Access probe cannot replace a restored connection or a new viewer link", async ({
+  page,
+  relay,
+}) => {
+  const sockets: WebSocketRoute[] = [];
+  const probes: (() => Promise<void>)[] = [];
+  await page.route("**/", async (route) => {
+    if (route.request().resourceType() !== "fetch") {
+      await route.continue();
+      return;
+    }
+    probes.push(async () => {
+      await route.fulfill({ status: 403 }).catch(() => {
+        /* The restored connection may already have aborted this request. */
+      });
+    });
+  });
+  await page.routeWebSocket("**/rooms/*/socket", (socket) => {
+    sockets.push(socket);
+    socket.connectToServer();
+  });
+  await relay.publish({ ...empty, canAnswer: true, live: true });
+  await page.goto(await relay.viewerURL());
+  await expect(page.getByRole("status")).toHaveText("Listening");
+  const [first] = sockets;
+  if (!first) {
+    throw new Error("The viewer did not establish its initial connection");
+  }
+  await first.close({ code: 1001, reason: "Temporary interruption" });
+  await expect.poll(() => probes.length).toBe(1);
+  await expect.poll(() => sockets.length).toBe(2);
+  await expect(page.getByRole("status")).toHaveText("Listening");
+  const [firstProbe] = probes;
+  if (!firstProbe) {
+    throw new Error("The connection did not check deployment access");
+  }
+  await firstProbe();
+  await expect(page.getByRole("status")).toHaveText("Listening");
+  const [, second] = sockets;
+  if (!second) {
+    throw new Error("The viewer did not restore its connection");
+  }
+  await second.close({ code: 1001, reason: "Another temporary interruption" });
+  await expect.poll(() => probes.length).toBe(2);
+  await page.evaluate(() => {
+    location.hash = "broken";
+  });
+  await expect(page.getByRole("status")).toHaveText(failure);
+  const [, secondProbe] = probes;
+  if (!secondProbe) {
+    throw new Error("The second interruption did not check deployment access");
+  }
+  await secondProbe();
+  await expect(page.getByRole("status")).toHaveText(failure);
+  await expect(page.getByRole("link", { name: "Sign in" })).toHaveCount(0);
 });
 
 test("generation status follows the active request while older answers remain readable", async ({
@@ -1097,6 +1672,63 @@ test("request hints follow encrypted Mac availability without exposing service e
   await expect(pane).not.toContainText("Space");
 });
 
+test("failed answers retain scoped recovery guidance after a later request clears the error", async ({
+  page,
+  relay,
+}) => {
+  const failed = {
+    id: "failed",
+    status: "failed" as const,
+    text: "Partial earlier answer.",
+  };
+  const state: ViewState = {
+    ...empty,
+    answers: [failed],
+    canAnswer: true,
+    error: "Private request diagnostic",
+    live: true,
+    selectedID: failed.id,
+  };
+  await relay.publish(state);
+  await page.goto(await relay.viewerURL());
+  const pane = page.getByRole("region", { exact: true, name: "Answer" });
+  await expect(pane.getByRole("alert")).toContainText(
+    "Check the error in Settings"
+  );
+  const recovered: ViewState = {
+    ...state,
+    answers: [
+      failed,
+      { id: "next", status: "complete", text: "New successful answer." },
+    ],
+    error: "",
+    selectedID: "next",
+    selection: 1,
+  };
+  await relay.publish(recovered);
+  await expect(pane).toContainText("New successful answer.");
+  await relay.publish({ ...recovered, selectedID: failed.id, selection: 2 });
+  await expect(pane).toContainText("Partial earlier answer.");
+  await expect(pane.getByRole("alert")).toHaveCount(0);
+  await expect(pane.locator(".error")).toHaveText(
+    "Could not complete this answer. Request another answer on your Mac."
+  );
+  await expect(pane).not.toContainText("Private request diagnostic");
+  await relay.publish({
+    ...recovered,
+    canAnswer: false,
+    selectedID: failed.id,
+    selection: 2,
+  });
+  await expect(pane.locator(".error")).toHaveText(
+    "Could not complete this answer. Check Settings on your Mac to continue."
+  );
+  await relay.end();
+  await expect(pane.locator(".error")).toHaveText(
+    "Could not complete this answer. Start a new session on your Mac and open its viewer link."
+  );
+});
+
 test("recovery changes keep partial answers, anchors and scrolling usable", async ({
   page,
   relay,
@@ -1166,3 +1798,84 @@ test("recovery changes keep partial answers, anchors and scrolling usable", asyn
     pane.getByText("Incomplete answer", { exact: true })
   ).toBeInViewport();
 });
+
+for (const [name, cache] of [
+  [
+    "string offset",
+    '[ ["stale", {"id":"h1.0","offset":0}], ["answer", {"id":"h1.0","offset":"-900"}] ]',
+  ],
+  [
+    "nonfinite offset",
+    '[ ["stale", {"id":"h1.0","offset":0}], ["answer", {"id":"h1.0","offset":1e400}] ]',
+  ],
+  [
+    "invalid anchor ID",
+    '[ ["stale", {"id":42,"offset":0}], ["answer", {"id":"h1.0","offset":-900}] ]',
+  ],
+] as const) {
+  test(`a damaged reading cache (${name}) resets safely and keeps remote reading and acknowledgments usable`, async ({
+    page,
+    relay,
+  }) => {
+    const viewer = await relay.viewerURL();
+    const memory = `reading:${new URL(viewer).hash.split(".")[0]}`;
+    const paragraphs = Array.from(
+      { length: 60 },
+      (_, i) =>
+        `Paragraph ${i + 1} remains readable after the damaged cache is discarded.\n\n`
+    ).join("");
+    const state: ViewState = {
+      ...empty,
+      answers: [
+        {
+          id: "answer",
+          status: "complete",
+          text: `# Cache fallback\n\n${paragraphs}`,
+        },
+      ],
+      canAnswer: true,
+      live: true,
+      selectedID: "answer",
+    };
+    await page.goto("/");
+    const snapshot = await relay.publish(state);
+    await page.evaluate(
+      ({ key, value }) => {
+        sessionStorage.setItem(key, value);
+      },
+      { key: memory, value: cache }
+    );
+    await page.goto(viewer);
+    const pane = page.getByRole("region", { exact: true, name: "Answer" });
+    await expect(page.getByRole("status")).toHaveText("Listening");
+    await expect(
+      pane.getByRole("heading", { name: "Cache fallback" })
+    ).toBeVisible();
+    await expect.poll(async () => await position(pane)).toBe(0);
+    await expect
+      .poll(
+        async () =>
+          await page.evaluate((key) => sessionStorage.getItem(key), memory)
+      )
+      .not.toContain('"stale"');
+    const initial = await relay.writer.next("ack");
+    expect(await decryptAcknowledgment(relay, initial)).toEqual({
+      command: 0,
+      seq: snapshot.seq,
+    });
+    const command = 1;
+    const packet = await relay.publish({
+      ...state,
+      command: { answerID: "answer", direction: 1, id: command },
+    });
+    const height = await pane.evaluate((element) => element.clientHeight);
+    await expect
+      .poll(async () => await position(pane))
+      .toBeCloseTo(height / 2, 0);
+    const applied = await relay.writer.next("ack");
+    expect(await decryptAcknowledgment(relay, applied)).toEqual({
+      command,
+      seq: packet.seq,
+    });
+  });
+}

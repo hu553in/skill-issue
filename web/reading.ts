@@ -1,7 +1,13 @@
-export interface Anchor {
-  id: string;
-  offset: number;
-}
+import * as v from "valibot";
+
+const AnchorSchema = v.object({
+  id: v.string(),
+  offset: v.pipe(v.number(), v.finite()),
+});
+export type Anchor = v.InferOutput<typeof AnchorSchema>;
+export const ReadingPositionsSchema = v.array(
+  v.strictTuple([v.string(), AnchorSchema])
+);
 const destinations = new WeakMap<HTMLElement, number>();
 const corrections = new WeakMap<HTMLElement, number>();
 const watched = new WeakSet<HTMLElement>();

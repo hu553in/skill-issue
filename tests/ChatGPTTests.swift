@@ -114,17 +114,17 @@ private final class TestHTTP: @unchecked Sendable {
             catalogCode = code
         }
     }
-    func rejectPendingRefresh() {
+    func rejectPendingRefresh(code: String? = "invalid_grant", status: Int = 400) {
         let pending = lock.withLock {
             let pending = refresh
             refresh = nil
             return pending
         }
-        pending?.respond(["error": "invalid_grant"], status: 400)
+        pending?.respond(code.map { ["error": $0] } ?? [:], status: status)
     }
     func finishRefresh(
         includeScope: Bool = true, expiresIn: Int = 3600,
-        scope: Any = "chatgpt.tokens.use.direct"
+        scope: Any = "chatgpt.tokens.use.direct", refreshToken: String = "replacement-refresh"
     ) {
         let pending = lock.withLock {
             let pending = refresh
@@ -132,7 +132,7 @@ private final class TestHTTP: @unchecked Sendable {
             return pending
         }
         var tokens: [String: Any] = [
-            "access_token": "replacement-access", "refresh_token": "replacement-refresh",
+            "access_token": "replacement-access", "refresh_token": refreshToken,
             "expires_in": expiresIn, "token_type": "bearer",
         ]
         if includeScope { tokens["scope"] = scope }
@@ -976,6 +976,57 @@ struct ChatGPTTests {
         #expect(chatGPT.account?.session == nil)
     }
 
+    @Test func shutdownKeepsConfigurationLockedUntilRotatingCredentialsAreSaved() async throws {
+        let stored = StoredAccount(expired: true)
+        let server = TestHTTP()
+        let session = MockHTTPProtocol.session(server: server)
+        defer { session.invalidateAndCancel() }
+        let defaults = TestDefaults()
+        let client = ChatGPT(session: session, storage: stored.storage, defaults: defaults)
+        let model = Model(chatGPT: client, defaults: defaults)
+        try await waitUntil { server.refreshPending }
+        server.finishRefresh(expiresIn: 30)
+        try await waitUntil { !model.working }
+        try #require(model.canStartSession)
+        model.state.live = true
+        model.state.beginAnswer(id: "retained")
+        model.state.answers[0].text = "Keep this answer while shutting down"
+        model.state.answers[0].status = "complete"
+        let answers = model.state.answers
+        let refreshing = Task { try await client.listModels() }
+        defer { refreshing.cancel() }
+        try await waitUntil { server.refreshPending }
+        let cleanup = model.endSession()
+        var started = false
+        var finished = false
+        let shutdown = Task {
+            started = true
+            await model.shutdown()
+            finished = true
+        }
+        try await waitUntil { started }
+        #expect(model.working && model.status == "Quitting…")
+        await cleanup.value
+        #expect(!finished && server.refreshPending)
+        #expect(model.working && model.status == "Quitting…")
+        #expect(!model.canConfigureViewer && !model.canAuthenticate && !model.canChooseAccount)
+        #expect(!model.canSelectModel && !model.canSelectEffort && !model.canRetryModels)
+        #expect(!model.canAnswer && !model.canStartSession && !model.canRecover)
+        #expect(model.state.answers == answers)
+        let accessEnabled = model.viewerAccessEnabled
+        model.setViewerAccessEnabled(!accessEnabled)
+        model.configureViewerAccess()
+        #expect(model.viewerAccessEnabled == accessEnabled && !model.configuringViewerAccess)
+        server.finishRefresh(refreshToken: "shutdown-refresh")
+        _ = try await refreshing.value
+        await shutdown.value
+        #expect(finished && stored.current?.session?.refreshToken == "shutdown-refresh")
+        #expect(stored.current?.pendingSession == nil && server.refreshes == 2)
+        #expect(stored.events == ["save:replacement-refresh", "save:shutdown-refresh"])
+        #expect(model.state.answers == answers && !model.state.live)
+        #expect(model.working && model.status == "Quitting…" && !model.canConfigureViewer)
+    }
+
     @Test func storageFailureDoesNotReuseRevokedTokens() async throws {
         let stored = StoredAccount()
         stored.rejectSave = true
@@ -1109,9 +1160,10 @@ struct ChatGPTTests {
         #expect(model.state.live == live && model.state.answers == retained)
         stored.rejectSave = false
         model.recover()
+        try await waitUntil { !model.working }
         #expect(model.recovery == .enablePlan && model.needsPlanPermission)
-        #expect(model.canRecover == !live && model.state.answers == retained)
-        #expect(model.state.live == live && !model.working && !model.canAnswer)
+        #expect(model.canRecover && model.state.answers == retained)
+        #expect(!model.state.live && !model.working && !model.canAnswer)
         #expect(stored.current?.session?.scopes == ["openid", "profile", "email"])
         #expect(server.refreshes == 2 && server.modelsRequested == 1)
         #expect(server.wireRequests.isEmpty)
@@ -1196,7 +1248,7 @@ struct ChatGPTTests {
     }
 
     @Test func eventStreamFramingPreservesUnicodeAndMultilineData() async throws {
-        for delimiter in ["\n", "\r\n"] {
+        for delimiter in ["\n", "\r\n", "\r"] {
             let stream = """
                 : heartbeat
 
@@ -1259,15 +1311,13 @@ struct ChatGPTTests {
     }
 
     @Test func eventStreamLineLimitIsEnforcedBeforeDispatch() async throws {
-        for delimiter in ["\n", "\r\n"] {
+        for delimiter in ["\n", "\r\n", "\r"] {
             for size in [256_000, 256_001] {
                 let prefix = "data: {\"type\":\"response.output_text.delta\",\"delta\":\""
                 let suffix = "\"}"
-                // The bound counts CR before LF, matching the existing network contract.
                 let text = String(
                     repeating: "x",
-                    count: size - prefix.utf8.count - suffix.utf8.count
-                        - (delimiter == "\r\n" ? 1 : 0))
+                    count: size - prefix.utf8.count - suffix.utf8.count)
                 let stream =
                     prefix + text + suffix + delimiter + delimiter
                     + "data: {\"type\":\"response.completed\"}" + delimiter + delimiter
@@ -1292,38 +1342,54 @@ struct ChatGPTTests {
         }
     }
 
-    @Test func cancelledEventStreamStopsRequestWithoutReplay() async throws {
-        let server = TestHTTP(
-            stream: [
-                Data(
-                    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Partial\"}\n\n".utf8
-                )
-            ],
-            finishStream: false)
+    @Test func eventStreamAcceptsManyShortCRDelimitedEvents() async throws {
+        let event = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"x\"}\r\r"
+        let stream =
+            String(repeating: event, count: 6000) + "data: {\"type\":\"response.completed\"}\r\r"
+        let server = TestHTTP(stream: [Data(stream.utf8)])
         let session = MockHTTPProtocol.session(server: server)
         defer { session.invalidateAndCancel() }
         let chatGPT = try await configuredChatGPT(session: session)
-        var text = ""
-        var finished = false
-        var failed = false
-        let answer = Task {
-            defer { finished = true }
-            do {
-                try await chatGPT.answer(
-                    input: [], language: "English",
-                    model: try ChatGPTModel(fields: catalogModel("gpt-6-luna")), effort: "low"
-                ) { text += $0 }
-            } catch {
-                failed = true
-            }
-        }
-        defer { answer.cancel() }
-        try await waitUntil { text == "Partial" }
-        answer.cancel()
-        try await waitUntil { finished && server.cancelledResponses > 0 }
-        await answer.value
-        #expect(failed && text == "Partial")
+        var received = ""
+        try await chatGPT.answer(
+            input: [], language: "English",
+            model: try ChatGPTModel(fields: catalogModel("gpt-6-luna")), effort: "low"
+        ) { received += $0 }
+        #expect(received == String(repeating: "x", count: 6000))
         #expect(server.wireRequests.count == 1)
+    }
+
+    @Test func cancelledEventStreamStopsRequestWithoutReplay() async throws {
+        for delimiter in ["\n", "\r\n", "\r"] {
+            let delta =
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Partial\"}"
+                + delimiter + delimiter
+            let server = TestHTTP(stream: [Data(delta.utf8)], finishStream: false)
+            let session = MockHTTPProtocol.session(server: server)
+            defer { session.invalidateAndCancel() }
+            let chatGPT = try await configuredChatGPT(session: session)
+            var text = ""
+            var finished = false
+            var failed = false
+            let answer = Task {
+                defer { finished = true }
+                do {
+                    try await chatGPT.answer(
+                        input: [], language: "English",
+                        model: try ChatGPTModel(fields: catalogModel("gpt-6-luna")), effort: "low"
+                    ) { text += $0 }
+                } catch {
+                    failed = true
+                }
+            }
+            defer { answer.cancel() }
+            try await waitUntil { text == "Partial" }
+            answer.cancel()
+            try await waitUntil { finished && server.cancelledResponses > 0 }
+            await answer.value
+            #expect(failed && text == "Partial")
+            #expect(server.wireRequests.count == 1)
+        }
     }
 
     @Test func nonSuccessfulResponsesStatusDoesNotEmitTextOrReplay() async throws {
@@ -1409,6 +1475,141 @@ struct ChatGPTTests {
         #expect(model.feedback?.code == "invalid_grant")
         #expect(model.state.answers[0].text == "Keep this answer")
         #expect(!model.state.canAnswer && store.current?.session == nil)
+        await model.shutdown()
+    }
+
+    @Test func cancelledReducedPermissionRefreshStillStopsTheLiveSession() async throws {
+        let store = StoredAccount(expired: true)
+        let server = TestHTTP()
+        let session = MockHTTPProtocol.session(server: server)
+        defer { session.invalidateAndCancel() }
+        let defaults = TestDefaults()
+        let client = ChatGPT(session: session, storage: store.storage, defaults: defaults)
+        let model = Model(chatGPT: client, defaults: defaults)
+        try await waitUntil { server.refreshPending }
+        server.finishRefresh(expiresIn: 30)
+        try await waitUntil { !model.working }
+        try #require(model.canStartSession)
+        model.state.live = true
+        model.state.beginAnswer(id: "saved")
+        model.state.answers[0].text = "Keep this answer"
+        model.state.answers[0].status = "complete"
+        let retained = model.state.answers
+        let request = Task {
+            do { _ = try await client.listModels() } catch {
+                // A cancelled answer suppresses errors from its obsolete request.
+                if !Task.isCancelled { model.showError(error) }
+            }
+        }
+        try await waitUntil { server.refreshPending }
+        request.cancel()
+        server.finishRefresh(scope: "openid profile email")
+        await request.value
+        await client.finishPendingRefresh()
+        try await waitUntil { !model.working }
+        #expect(!model.state.live && !model.canAnswer && model.state.answers == retained)
+        #expect(model.needsPlanPermission && model.models.isEmpty)
+        #expect(model.recovery == .enablePlan && model.canRecover && model.canAuthenticate)
+        #expect(!model.error.isEmpty && model.feedback?.stopsSession == true)
+        #expect(store.current?.session?.scopes == ["openid", "profile", "email"])
+        #expect(server.refreshes == 2 && server.modelsRequested == 1)
+        await model.shutdown()
+    }
+
+    @Test func cancelledRefreshAuthorizationFailuresStillStopTheLiveSession() async throws {
+        for (code, status, terminal) in [
+            ("invalid_client", 400, true),
+            ("subscription_sharing_invalid_user", 401, true),
+            ("subscription_sharing_user_not_eligible", 403, true),
+            ("chatpass_v2_scope_not_authorized", 403, true),
+            ("chatpass_v2_invalid_authorization_context", 403, true),
+            (nil, 401, true),
+            ("temporarily_unavailable", 503, false),
+        ] as [(String?, Int, Bool)] {
+            let store = StoredAccount(expired: true)
+            let server = TestHTTP()
+            let session = MockHTTPProtocol.session(server: server)
+            defer { session.invalidateAndCancel() }
+            let defaults = TestDefaults()
+            let client = ChatGPT(session: session, storage: store.storage, defaults: defaults)
+            let model = Model(chatGPT: client, defaults: defaults)
+            try await waitUntil { server.refreshPending }
+            server.finishRefresh(expiresIn: 30)
+            try await waitUntil { !model.working }
+            try #require(model.canStartSession)
+            model.state.live = true
+            model.state.beginAnswer(id: "saved")
+            model.state.answers[0].text = "Keep this answer"
+            model.state.answers[0].status = "complete"
+            let retained = model.state.answers
+            let request = Task {
+                do { _ = try await client.listModels() } catch {
+                    if !Task.isCancelled { model.showError(error) }
+                }
+            }
+            try await waitUntil { server.refreshPending }
+            request.cancel()
+            server.rejectPendingRefresh(code: code, status: status)
+            await request.value
+            await client.finishPendingRefresh()
+            try await waitUntil { !model.working }
+            #expect(model.state.live == !terminal)
+            #expect(model.canAnswer == !terminal)
+            #expect(model.state.answers == retained)
+            // Registration failures are not evidence that a refresh token was revoked.
+            #expect(store.current?.session?.refreshToken == "replacement-refresh")
+            #expect(model.savedAccounts.count == 1 && !model.account.isEmpty)
+            if terminal {
+                #expect(model.feedback?.status == status && model.feedback?.code == code)
+                #expect(model.feedback?.requestID == "fixture-request")
+                #expect(!model.error.isEmpty && model.canAuthenticate)
+                #expect(
+                    model.recovery
+                        == (code == "subscription_sharing_user_not_eligible"
+                            ? .none : .configuration))
+                #expect(!model.canRecover)
+            } else {
+                #expect(model.feedback == nil && model.error.isEmpty)
+            }
+            #expect(server.refreshes == 2 && server.modelsRequested == 1)
+            #expect(server.wireRequests.isEmpty)
+            await model.shutdown()
+        }
+    }
+
+    @Test func terminalRefreshWhileLiveStopsWithoutDiscardingAnswers() async throws {
+        let store = StoredAccount(expired: true)
+        let server = TestHTTP()
+        let session = MockHTTPProtocol.session(server: server)
+        defer { session.invalidateAndCancel() }
+        let defaults = TestDefaults()
+        let client = ChatGPT(session: session, storage: store.storage, defaults: defaults)
+        let model = Model(chatGPT: client, defaults: defaults)
+        try await waitUntil { server.refreshPending }
+        server.finishRefresh(expiresIn: 30)
+        try await waitUntil { !model.working }
+        try #require(model.canStartSession)
+        model.state.live = true
+        model.state.beginAnswer(id: "saved")
+        model.state.answers[0].text = "Keep this answer"
+        model.state.answers[0].status = "complete"
+        let retained = model.state.answers
+        let request = Task { try await client.listModels() }
+        try await waitUntil { server.refreshPending }
+        server.rejectPendingRefresh()
+        await client.finishPendingRefresh()
+        do {
+            _ = try await request.value
+            Issue.record("A revoked refresh token was accepted")
+        } catch let failure as ChatGPTFailure { #expect(failure.recovery == .signIn) }
+        try await waitUntil { !model.working }
+        #expect(!model.state.live && !model.canAnswer && model.state.answers == retained)
+        #expect(model.account.isEmpty && model.models.isEmpty)
+        #expect(model.canAuthenticate && model.canConfigureViewer)
+        #expect(model.recovery == .signIn && model.canRecover)
+        #expect(model.feedback?.code == "invalid_grant" && !model.error.isEmpty)
+        #expect(store.current?.session == nil && store.current?.clientID == "fake-client")
+        #expect(server.refreshes == 2 && server.modelsRequested == 1 && server.wireRequests.isEmpty)
         await model.shutdown()
     }
 

@@ -214,7 +214,13 @@ kbd {
 
 .connection-error {
   flex: none;
-  margin: 14px 20px 0;
+  margin: 14px 20px;
+}
+
+.connection-error a {
+  display: inline-block;
+  min-height: 24px;
+  color: inherit;
 }
 
 .welcome h1 {

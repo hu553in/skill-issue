@@ -25,9 +25,12 @@ final class Capture {
         microphone: String,
         failed: @escaping @MainActor @Sendable () -> Void
     ) async throws {
-        guard await AVCaptureDevice.requestAccess(for: .audio),
-            CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess()
-        else { throw AppFailure.failed }
+        guard await AVCaptureDevice.requestAccess(for: .audio) else {
+            throw AppFailure.microphonePermission
+        }
+        guard CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess() else {
+            throw AppFailure.screenCapturePermission
+        }
         let content = try await SCShareableContent.excludingDesktopWindows(
             false, onScreenWindowsOnly: true)
         guard

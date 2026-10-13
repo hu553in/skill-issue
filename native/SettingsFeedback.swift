@@ -2,6 +2,16 @@ import AppKit
 import SwiftUI
 
 enum SettingsColors {
+    static let secondaryText = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            ? NSColor(srgbRed: 0.67, green: 0.67, blue: 0.67, alpha: 1)
+            : NSColor(srgbRed: 0.35, green: 0.35, blue: 0.35, alpha: 1)
+    }
+    static let link = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            ? NSColor(srgbRed: 0.31, green: 0.68, blue: 1, alpha: 1)
+            : NSColor(srgbRed: 0, green: 0.39, blue: 0.70, alpha: 1)
+    }
     // Small red labels need more contrast than system red on tinted controls.
     static let destructive = NSColor(name: nil) { appearance in
         appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
@@ -19,10 +29,13 @@ struct SettingsHeader: View {
     let error: String
     let catalogError: String
     let feedback: ChatGPTFailure?
+    var failureStatus: String?
+    var setupRequired = false
     private var hasMessage: Bool { !error.isEmpty || !catalogError.isEmpty }
-    private var warning: Bool { feedback?.isWarning ?? false }
+    private var warning: Bool { hasMessage ? feedback?.isWarning ?? false : setupRequired }
     private var statusLabel: String {
         guard !working && hasMessage else { return status }
+        if let failureStatus { return failureStatus }
         switch feedback?.recovery {
         case .signIn?: return "Sign in required"
         case .enablePlan?: return "Permission required"
@@ -31,14 +44,14 @@ struct SettingsHeader: View {
     }
     private var statusColor: Color {
         if working { return .blue }
-        if hasMessage && warning { return .orange }
+        if warning { return .orange }
         if hasMessage { return Color(nsColor: SettingsColors.destructive) }
         if answering { return .blue }
         return live ? .green : .secondary
     }
     private var statusIcon: String {
         if working { return "ellipsis" }
-        if hasMessage && warning { return "exclamationmark.triangle.fill" }
+        if warning { return "exclamationmark.triangle.fill" }
         if hasMessage { return "exclamationmark.circle.fill" }
         if answering { return "ellipsis" }
         return live ? "waveform" : canStart ? "checkmark.circle" : "person.crop.circle"
@@ -68,12 +81,11 @@ struct SettingsHeader: View {
     }
 }
 
-struct SettingsErrorNotice: View {
+struct SettingsNotice: View {
     let messages: [String]
     let warning: Bool
     let diagnostic: String
     let actionTitle: String?
-    let actionHint: String
     let actionDisabled: Bool
     let action: () -> Void
     let retryModels: (() -> Void)?
@@ -92,10 +104,6 @@ struct SettingsErrorNotice: View {
                 ForEach(messages, id: \.self) {
                     Text($0).font(.callout).foregroundStyle(.primary)
                         .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
-                }
-                if !actionHint.isEmpty {
-                    Text(actionHint).font(.callout).foregroundStyle(.primary)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
                 if !diagnostic.isEmpty {
                     DisclosureGroup("Details", isExpanded: $detailsExpanded) {

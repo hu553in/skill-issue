@@ -1,5 +1,5 @@
 import Foundation
-import Security
+import SimpleKeychain
 
 struct ChatGPTSession: Codable, Sendable {
     var idToken: String
@@ -85,39 +85,18 @@ struct AccountStorage: Sendable {
     var load: @Sendable () throws -> ChatGPTAccounts?
     var save: @Sendable (ChatGPTAccounts) throws -> Void
 
-    private static func query() -> [String: Any] {
-        [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "com.github.hu553in.skill-issue",
-            kSecAttrAccount as String: "chatgpt",
-        ]
-    }
-
     static let keychain = Self(
         load: {
-            var result: CFTypeRef?
-            let status = SecItemCopyMatching(
-                query().merging([
-                    kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitOne,
-                ]) { _, new in new } as CFDictionary, &result)
-            if status == errSecItemNotFound { return nil }
-            guard status == errSecSuccess, let data = result as? Data else {
-                throw AppFailure.failed
-            }
+            let data: Data
+            do { data = try credentialKeychain.data(forKey: "chatgpt") } catch SimpleKeychainError
+                .itemNotFound
+            { return nil } catch { throw AppFailure.failed }
             return try JSONDecoder().decode(ChatGPTAccounts.self, from: data)
         },
         save: { value in
-            let attributes: [String: Any] = [
-                kSecValueData as String: try JSONEncoder().encode(value)
-            ]
-            var status = SecItemUpdate(query() as CFDictionary, attributes as CFDictionary)
-            if status == errSecItemNotFound {
-                status = SecItemAdd(
-                    query().merging(attributes) { _, new in new }.merging([
-                        kSecAttrAccessible as String:
-                            kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-                    ]) { _, new in new } as CFDictionary, nil)
+            let data = try JSONEncoder().encode(value)
+            do { try credentialKeychain.set(data, forKey: "chatgpt") } catch {
+                throw AppFailure.failed
             }
-            guard status == errSecSuccess else { throw AppFailure.failed }
         })
 }

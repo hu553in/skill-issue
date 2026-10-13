@@ -48,7 +48,8 @@ struct SettingsControls: View {
                 HStack(alignment: .firstTextBaseline, spacing: 5) {
                     Text("Hold")
                     ShortcutModifiers()
-                }.font(.subheadline).foregroundStyle(.secondary)
+                }.font(.subheadline)
+                    .foregroundStyle(Color(nsColor: SettingsColors.secondaryText))
                 Spacer(minLength: 0)
             }
         }

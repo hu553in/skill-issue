@@ -2,9 +2,32 @@ import CryptoKit
 import Foundation
 import JOSESwift
 
+private final class ViewerSessionDelegate: NSObject, URLSessionTaskDelegate {
+    func urlSession(
+        _ session: URLSession, task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
+        completionHandler: @escaping @Sendable (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
+    }
+}
+
+private func viewerAccessDenied(_ response: URLResponse?) -> Bool {
+    guard let response = response as? HTTPURLResponse else { return false }
+    if response.statusCode == 401 || response.statusCode == 403 { return true }
+    guard (300..<400).contains(response.statusCode),
+        let location = response.value(forHTTPHeaderField: "Location"),
+        let url = URL(string: location, relativeTo: response.url)
+    else { return false }
+    return url.host?.lowercased().hasSuffix(".cloudflareaccess.com") == true
+        || url.path.hasPrefix("/cdn-cgi/access/login")
+}
+
 @MainActor
 final class Relay {
     private let base: URL
+    private let credentials: ViewerAccessCredentials?
+    private let session: URLSession
     private let room: String
     private let writer: String
     private let key: CryptoKit.SymmetricKey
@@ -15,12 +38,24 @@ final class Relay {
     private var closed = false
     private var latest: ViewState?
     private var sendTask: Task<Void, Never>?
+    private struct Publication {
+        let packet: String
+        let controls: Bool
+    }
+    private var pending: [Publication] = []
+    private var pendingBytes = 0
     private var readers: Set<String> = []
     private var acknowledgments: [String: Int] = [:]
     var onConnection: ((Bool, Int, Int) -> Void)?
+    var onFailure: ((Error) -> Void)?
 
-    private init(base: URL, room: String, writer: String, reader: String) {
+    private init(
+        base: URL, credentials: ViewerAccessCredentials?, session: URLSession,
+        room: String, writer: String, reader: String
+    ) {
         self.base = base
+        self.credentials = credentials
+        self.session = session
         self.room = room
         self.writer = writer
         key = CryptoKit.SymmetricKey(size: .bits256)
@@ -31,38 +66,72 @@ final class Relay {
             "\(room).\(reader).\(key.withUnsafeBytes { Data($0) }.base64URLEncodedString())"
         viewerURL = viewer.url!
     }
-    static func create(url: String) async throws -> Relay {
-        guard let base = URL(string: url), base.host != nil, base.path.isEmpty || base.path == "/",
-            base.query == nil, base.fragment == nil,
-            base.scheme == "https"
-                || base.scheme == "http" && ["127.0.0.1", "localhost"].contains(base.host ?? "")
-        else { throw AppFailure.failed }
-        var request = URLRequest(url: base.appendingPathComponent("rooms"))
-        request.httpMethod = "POST"
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard (response as? HTTPURLResponse)?.statusCode == 200,
-            let json = try JSONSerialization.jsonObject(with: data) as? [String: String],
-            let room = json["id"], let writer = json["writer"], let reader = json["reader"],
-            UUID(uuidString: room) != nil, Data(base64URLEncoded: writer)?.count == 32,
-            Data(base64URLEncoded: reader)?.count == 32
-        else { throw AppFailure.failed }
-        let relay = Relay(base: base, room: room, writer: writer, reader: reader)
+    deinit { session.invalidateAndCancel() }
+
+    static func create(url: String, credentials: ViewerAccessCredentials? = nil) async throws
+        -> Relay
+    {
+        let endpoint = try ViewerEndpoint(url)
+        try credentials?.validate(for: endpoint)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
+        configuration.urlCredentialStorage = nil
+        configuration.urlCache = nil
+        let session = URLSession(
+            configuration: configuration, delegate: ViewerSessionDelegate(), delegateQueue: nil)
         do {
-            try await relay.connect()
-            return relay
+            var request = request(
+                endpoint.url.appendingPathComponent("rooms"), credentials: credentials)
+            request.httpMethod = "POST"
+            let (data, response) = try await session.data(for: request)
+            if viewerAccessDenied(response) { throw ViewerFailure.accessDenied }
+            guard (response as? HTTPURLResponse)?.statusCode == 200,
+                let json = try JSONSerialization.jsonObject(with: data) as? [String: String],
+                let room = json["id"], let writer = json["writer"], let reader = json["reader"],
+                UUID(uuidString: room) != nil, Data(base64URLEncoded: writer)?.count == 32,
+                Data(base64URLEncoded: reader)?.count == 32
+            else { throw ViewerFailure.generic }
+            let relay = Relay(
+                base: endpoint.url, credentials: credentials, session: session,
+                room: room, writer: writer, reader: reader)
+            do {
+                try await relay.connect()
+                return relay
+            } catch {
+                // Room deletion still runs if startup itself was cancelled.
+                await Task { try? await relay.close() }.value
+                throw error
+            }
         } catch {
-            // Room deletion still runs if startup itself was cancelled.
-            await Task { try? await relay.close() }.value
-            throw error
+            session.invalidateAndCancel()
+            if error is ViewerFailure || Task.isCancelled || error is CancellationError {
+                throw error
+            }
+            throw ViewerFailure.generic
         }
+    }
+
+    private static func request(_ url: URL, credentials: ViewerAccessCredentials?) -> URLRequest {
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
+        request.httpShouldHandleCookies = false
+        if let credentials {
+            request.setValue(credentials.clientID, forHTTPHeaderField: "CF-Access-Client-Id")
+            request.setValue(
+                credentials.clientSecret, forHTTPHeaderField: "CF-Access-Client-Secret")
+        }
+        return request
     }
     private func connect() async throws {
         var endpoint = URLComponents(
             url: base.appendingPathComponent("rooms/\(room)/socket"), resolvingAgainstBaseURL: false
         )!
         endpoint.scheme = base.scheme == "https" ? "wss" : "ws"
-        let next = URLSession.shared.webSocketTask(
-            with: endpoint.url!, protocols: ["skill-issue", "skill-issue.writer.\(writer)"])
+        var request = Self.request(endpoint.url!, credentials: credentials)
+        request.setValue(
+            "skill-issue, skill-issue.writer.\(writer)",
+            forHTTPHeaderField: "Sec-WebSocket-Protocol")
+        let next = session.webSocketTask(with: request)
         next.resume()
         // URLSession's WebSocket receive does not cancel with its awaiting Task.
         // Bound the ready handshake too: an upgraded but silent server can wait forever.
@@ -90,6 +159,20 @@ final class Relay {
             if let latest { try publish(latest) }
         } catch {
             next.cancel(with: .goingAway, reason: nil)
+            if !closed && !Task.isCancelled {
+                if viewerAccessDenied(next.response) { throw ViewerFailure.accessDenied }
+                if next.response == nil {
+                    // A rejected upgrade can hide its HTTP response from URLSession.
+                    // Probe only the same origin, never the room or its secret link.
+                    var check = Self.request(base, credentials: credentials)
+                    check.timeoutInterval = 5
+                    if let (_, response) = try? await session.data(for: check),
+                        !closed, !Task.isCancelled, viewerAccessDenied(response)
+                    {
+                        throw ViewerFailure.accessDenied
+                    }
+                }
+            }
             throw error
         }
     }
@@ -105,14 +188,50 @@ final class Relay {
         latest = state
         guard let socket else { return }
         if controlsChanged { connectionChanged() }
-        let previous = sendTask
+        if !controlsChanged, let last = pending.last, !last.controls {
+            pendingBytes -= last.packet.utf8.count
+            pending.removeLast()
+        }
+        pending.append(Publication(packet: packet, controls: controlsChanged))
+        pendingBytes += packet.utf8.count
+        // One packet can be in flight; retain at most two maximum packets behind it.
+        // If explicit controls outpace the connection too, reconnect with the latest
+        // state rather than dropping queued controls on an apparently healthy socket.
+        guard pendingBytes <= maximumPacket * 2 else {
+            connectionLost()
+            return
+        }
+        guard sendTask == nil else { return }
         sendTask = Task { [weak self] in
-            await previous?.value
-            guard let self, !self.closed, self.socket === socket else { return }
-            do { try await socket.send(.string(packet)) } catch {
-                socket.cancel(with: .goingAway, reason: nil)
+            defer {
+                // A cancelled old sender must not clear the replacement connection.
+                if self?.socket === socket { self?.sendTask = nil }
+            }
+            while let self, !self.closed, !Task.isCancelled, self.socket === socket,
+                !self.pending.isEmpty
+            {
+                let next = self.pending.removeFirst()
+                self.pendingBytes -= next.packet.utf8.count
+                do { try await socket.send(.string(next.packet)) } catch {
+                    if self.socket === socket { self.connectionLost() }
+                    return
+                }
             }
         }
+    }
+    private func cancelSending() {
+        sendTask?.cancel()
+        sendTask = nil
+        pending = []
+        pendingBytes = 0
+    }
+    private func connectionLost() {
+        socket?.cancel(with: .goingAway, reason: nil)
+        socket = nil
+        cancelSending()
+        readers = []
+        acknowledgments = [:]
+        onConnection?(false, 0, 0)
     }
     func monitor() async {
         while !closed && !Task.isCancelled {
@@ -131,11 +250,11 @@ final class Relay {
                 }
                 if body["type"] as? String == "ack" { try? acceptAcknowledgment(body) }
             } catch {
-                socket?.cancel(with: .goingAway, reason: nil)
-                socket = nil
-                readers = []
-                acknowledgments = [:]
-                onConnection?(false, 0, 0)
+                connectionLost()
+                if !closed && !Task.isCancelled, (error as? ViewerFailure)?.stopsSession == true {
+                    onFailure?(error)
+                    return
+                }
                 if !closed && !Task.isCancelled { try? await Task.sleep(for: .seconds(2)) }
             }
         }
@@ -163,15 +282,19 @@ final class Relay {
             acknowledgments.values.filter { $0 >= controlsSequence }.count)
     }
     func close() async throws {
+        guard !closed else { return }
         closed = true
         socket?.cancel(with: .normalClosure, reason: nil)
         socket = nil
-        sendTask?.cancel()
-        var request = URLRequest(url: base.appendingPathComponent("rooms/\(room)/end"))
+        cancelSending()
+        defer { session.invalidateAndCancel() }
+        var request = Self.request(
+            base.appendingPathComponent("rooms/\(room)/end"), credentials: credentials)
         request.httpMethod = "POST"
         request.timeoutInterval = 5
         request.setValue("Bearer \(writer)", forHTTPHeaderField: "Authorization")
-        let (_, response) = try await URLSession.shared.data(for: request)
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw AppFailure.failed }
+        let (_, response) = try await session.data(for: request)
+        if viewerAccessDenied(response) { throw ViewerFailure.accessDenied }
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw ViewerFailure.generic }
     }
 }

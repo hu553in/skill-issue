@@ -20,12 +20,6 @@ export const empty: ViewState = {
   version: 1,
 };
 export const failure = "Couldn't complete that.";
-export const unbase64 = (text: string) =>
-  Uint8Array.from(atob(text.replaceAll("-", "+").replaceAll("_", "/")), (c) =>
-    // atob produces bytes, so each character is exactly one UTF-16 code unit.
-    // oxlint-disable-next-line unicorn/prefer-code-point
-    c.charCodeAt(0)
-  );
 export function parseLink(fragment: string) {
   const result = v.safeParse(
     ViewerLinkSchema,
@@ -37,13 +31,43 @@ export function parseLink(fragment: string) {
   const [room, token, key] = result.output;
   return { key, room, token };
 }
+const pendingAccessLink = "skill-issue:access-link";
+export function viewerFragment() {
+  let pending: string | null;
+  try {
+    pending = sessionStorage.getItem(pendingAccessLink);
+    sessionStorage.removeItem(pendingAccessLink);
+  } catch {
+    return location.hash;
+  }
+  if (location.hash || pending === null || pending === "") {
+    return location.hash;
+  }
+  try {
+    parseLink(pending);
+    const url = new URL(location.href);
+    url.hash = pending;
+    history.replaceState(history.state, "", url);
+    return location.hash;
+  } catch {
+    return location.hash;
+  }
+}
+export function rememberAccessLink(fragment: string) {
+  try {
+    parseLink(fragment);
+    sessionStorage.setItem(pendingAccessLink, fragment);
+  } catch {
+    /* Reopen the original viewer link if this browser cannot retain it. */
+  }
+}
 export async function decrypt(
   key: CryptoKey,
   room: string,
   packet: Packet
 ): Promise<ViewState> {
   v.parse(StatePacketSchema, packet);
-  const bytes = unbase64(packet.box);
+  const bytes = base64.decode(packet.box);
   const data = await crypto.subtle.decrypt(
     {
       additionalData: new TextEncoder().encode(`${room}:${packet.seq}`),

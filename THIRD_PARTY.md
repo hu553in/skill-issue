@@ -3,9 +3,10 @@
 The native app uses [JOSESwift](https://github.com/airsidemobile/JOSESwift),
 [swift-openapi-runtime](https://github.com/apple/swift-openapi-runtime) and
 [speech-swift](https://github.com/soniqo/speech-swift), all licensed under Apache 2.0.
-`Package.swift` pins these dependencies; `Package.resolved` records the transitive dependency tree.
-No source patches are applied. Web runtime dependencies are declared in `package.json` and resolved
-in `bun.lock`.
+[SimpleKeychain](https://github.com/auth0/SimpleKeychain) is licensed under MIT. `Package.swift`
+pins these dependencies; `Package.resolved` records the transitive dependency tree. No source
+patches are applied. Web runtime dependencies are declared in `package.json` and resolved in
+`bun.lock`.
 
 Builds include dependency license and notice texts with an `index.json` listing resolved versions
 and file paths:

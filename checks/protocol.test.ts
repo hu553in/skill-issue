@@ -19,36 +19,7 @@ import {
   restoreAnchor,
   scrollPage,
 } from "../web/reading";
-import {
-  acknowledgment,
-  decrypt,
-  empty,
-  parseLink,
-  unbase64,
-} from "../web/session";
-
-test("base64 decoding retains standard, URL-safe, padding and ASCII whitespace encodings", () => {
-  const vectors = [
-    { alternate: "", bytes: [], encoded: "" },
-    { alternate: "Zg", bytes: [102], encoded: "Zg==" },
-    { alternate: "Zm8", bytes: [102, 111], encoded: "Zm8=" },
-    { alternate: "Zm9v", bytes: [102, 111, 111], encoded: "Zm9v" },
-    { alternate: "-_8", bytes: [251, 255], encoded: "+/8=" },
-  ];
-  for (const { bytes, encoded, alternate } of vectors) {
-    const expected = new Uint8Array(bytes);
-    expect(unbase64(encoded)).toEqual(expected);
-    expect(unbase64(alternate)).toEqual(expected);
-    expect(unbase64(`\t${encoded}\n\f\r `)).toEqual(expected);
-  }
-  expect(unbase64("-_8=")).toEqual(new Uint8Array([251, 255]));
-  expect(unbase64("Zh==")).toEqual(new Uint8Array([102]));
-  expect(unbase64("Zm9=")).toEqual(new Uint8Array([102, 111]));
-  expect(unbase64("/x==")).toEqual(new Uint8Array([255]));
-  for (const invalid of ["Z", "Zg=", "Zg===", "Z=g=", "@@@@", "Zg==\u00A0"]) {
-    expect(() => unbase64(invalid)).toThrow();
-  }
-});
+import { acknowledgment, decrypt, empty, parseLink } from "../web/session";
 
 test("decrypted snapshots reject invalid domain fields without coercion", () => {
   const valid = {
@@ -187,6 +158,23 @@ test("encrypted history authenticates room, sequence and version", async () => {
   };
   const packet = await encrypt(state);
   expect(await decrypt(key, "room", packet)).toEqual(state);
+  const paddedState = packet.box.endsWith("=")
+    ? state
+    : { ...state, language: "English." };
+  const padded = packet.box.endsWith("=") ? packet : await encrypt(paddedState);
+  expect(await decrypt(key, "room", padded)).toEqual(paddedState);
+  const alphabet =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  const suffix = padded.box.endsWith("==") ? "==" : "=";
+  const lastIndex = padded.box.length - suffix.length - 1;
+  const last = alphabet.indexOf(padded.box.charAt(lastIndex));
+  const noncanonical =
+    padded.box.slice(0, lastIndex) + alphabet.charAt(last + 1) + suffix;
+  // Nonzero unused pad bits represent the same ciphertext to permissive decoders.
+  expect(atob(noncanonical)).toBe(atob(padded.box));
+  for (const box of [padded.box.replace(/=+$/u, ""), noncanonical]) {
+    expect(decrypt(key, "room", { ...padded, box })).rejects.toThrow();
+  }
   const noCommand = { ...state, command: null };
   expect(await decrypt(key, "room", await encrypt(noCommand))).toEqual(
     noCommand
@@ -215,7 +203,7 @@ test("encrypted history authenticates room, sequence and version", async () => {
   ) as {
     box: string;
   };
-  const bytes = unbase64(ack.box);
+  const bytes = base64.decode(ack.box);
   const open = async (client: string) =>
     await crypto.subtle.decrypt(
       {

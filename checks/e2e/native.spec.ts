@@ -3,14 +3,10 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
+import { base64urlnopad } from "@scure/base";
+
 import type { Packet } from "../../protocol";
-import {
-  acknowledgment,
-  decrypt,
-  empty,
-  parseLink,
-  unbase64,
-} from "../../web/session";
+import { acknowledgment, decrypt, empty, parseLink } from "../../web/session";
 import { expect, test } from "./fixtures";
 import { Peer } from "./peer";
 
@@ -65,18 +61,14 @@ test.beforeAll("Compile the native relay probe", async ({}, testInfo) => {
   testInfo.setTimeout(buildTimeout);
   const signal = AbortSignal.timeout(buildTimeout);
   binary = testInfo.outputPath("native-relay-check");
-  await execute(
-    "swift",
-    [
-      "build",
-      "--target",
-      "JOSESwift",
-      "--jobs",
-      "4",
-      "--force-resolved-versions",
-    ],
-    { signal }
-  );
+  const buildDependency = async (target: string) =>
+    await execute(
+      "swift",
+      ["build", "--target", target, "--jobs", "4", "--force-resolved-versions"],
+      { signal }
+    );
+  await buildDependency("JOSESwift");
+  await buildDependency("SimpleKeychain");
   const { stdout } = await execute(
     "swift",
     ["build", "--show-bin-path", "--force-resolved-versions"],
@@ -93,7 +85,9 @@ test.beforeAll("Compile the native relay probe", async ({}, testInfo) => {
       "-I",
       products,
       path.join(products, "JOSESwift.o"),
+      path.join(products, "SimpleKeychain.o"),
       "native/Core.swift",
+      "native/ViewerAccess.swift",
       "native/Relay.swift",
       "checks/native_relay.swift",
       "-o",
@@ -137,7 +131,7 @@ test("native relay confirms history, zoom and scroll without conflating viewer p
     expect(link.room).toBe(fixture.room);
     const key = await crypto.subtle.importKey(
       "raw",
-      unbase64(link.key),
+      Uint8Array.from(base64urlnopad.decode(link.key)),
       "AES-GCM",
       false,
       ["encrypt", "decrypt"]

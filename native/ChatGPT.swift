@@ -6,7 +6,7 @@ import OpenAPIRuntime
 import Security
 
 // The SSE decoder takes byte chunks and has no line-size limit. Bound URLSession's
-// input before it reaches the decoder, flushing on LF so tokens never wait for a full buffer.
+// input before it reaches the decoder, flushing on CR or LF so tokens never wait for a full buffer.
 private struct ResponseByteChunks: AsyncSequence, Sendable {
     let bytes: URLSession.AsyncBytes
     func makeAsyncIterator() -> Iterator { Iterator(bytes: bytes.makeAsyncIterator()) }
@@ -16,7 +16,7 @@ private struct ResponseByteChunks: AsyncSequence, Sendable {
             var chunk: [UInt8] = []
             while let byte = try await bytes.next() {
                 try Task.checkCancellation()
-                if byte == 10 {
+                if byte == 10 || byte == 13 {
                     chunk.append(byte)
                     return chunk[...]
                 }
@@ -218,10 +218,7 @@ final class ChatGPT {
         Any]
     {
         let jws = try JWS(compactSerialization: token)
-        let parts = token.split(separator: ".")
-        guard parts.count == 3, let headerData = Data(base64URLEncoded: String(parts[0])),
-            let header = try JSONSerialization.jsonObject(with: headerData) as? [String: Any],
-            header["alg"] as? String == "RS256", let kid = header["kid"] as? String
+        guard jws.header.algorithm == .RS256, let kid = jws.header.kid
         else { throw AppFailure.failed }
         let config = try await configuration()
         guard let uri = config["jwks_uri"] as? String, let url = URL(string: uri),
@@ -322,8 +319,12 @@ final class ChatGPT {
                         "grant_type": "refresh_token", "client_id": current.clientID,
                         "refresh_token": refresh, "resource": resource,
                     ])
-                } catch let failure as ChatGPTFailure where failure.isTerminalRefresh {
-                    try clearSession(failure: failure)
+                } catch let failure as ChatGPTFailure {
+                    if failure.isTerminalRefresh {
+                        try clearSession(failure: failure)
+                    } else if failure.stopsSession {
+                        accountStateChanged?(failure)
+                    }
                     throw failure
                 }
                 refreshed.pendingSession = try self.grant(
@@ -340,17 +341,21 @@ final class ChatGPT {
                 let claims: [String: Any]
                 do {
                     claims = try await identity(next.idToken, client: current.clientID, nonce: nil)
-                } catch let failure as ChatGPTFailure where failure.recovery == .signIn {
-                    requiresSignIn = true
-                    accountStateChanged?(failure)
+                } catch let failure as ChatGPTFailure {
+                    if failure.recovery == .signIn { requiresSignIn = true }
+                    if failure.stopsSession { accountStateChanged?(failure) }
                     throw failure
                 }
-                guard claims["sub"] as? String == current.subject else { throw AppFailure.failed }
+                guard claims["sub"] as? String == current.subject else {
+                    try clearSession(failure: .signInRequired)
+                    throw ChatGPTFailure.signInRequired
+                }
             }
             refreshed.session = next
             refreshed.pendingSession = nil
             try save(refreshed)
             guard next.canUsePlan, let token = next.accessToken else {
+                accountStateChanged?(.planDisabled)
                 throw ChatGPTFailure.planDisabled
             }
             guard next.expires.map({ $0 > Date() }) == true else { throw ChatGPTFailure.generic }

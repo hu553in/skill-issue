@@ -52,6 +52,20 @@ struct ChatGPTFailure: Error, Sendable {
 
     var isWarning: Bool { localReason == .localSignOut || localReason == .planDisabled }
 
+    var stopsSession: Bool {
+        if localReason == .signIn || localReason == .planDisabled || localReason == .tokenRemoval
+            || isTerminalRefresh
+        {
+            return true
+        }
+        return status == 401
+            || [
+                "invalid_client", "subscription_sharing_invalid_user",
+                "subscription_sharing_user_not_eligible", "chatpass_v2_scope_not_authorized",
+                "chatpass_v2_invalid_authorization_context",
+            ].contains(code ?? "")
+    }
+
     private func display(_ value: String) -> String {
         String(value.filter { !$0.isNewline && !$0.isWhitespace }.prefix(200))
     }
@@ -124,7 +138,7 @@ struct ChatGPTFailure: Error, Sendable {
                 "Skill Issue has reached a ChatGPT usage limit. Check your app and plan limits in ChatGPT Settings before choosing Request answer again."
         case "subscription_sharing_user_not_eligible":
             return
-                "ChatGPT plan usage is unavailable for this account or workspace. Stop the session, sign out, and sign in with an eligible account."
+                "ChatGPT plan usage is unavailable for this account or workspace. Sign out, then sign in with an eligible account."
         case "subscription_sharing_usage_unavailable", "subscription_sharing_user_unavailable":
             return "ChatGPT is temporarily unavailable. Try again later."
         case "subscription_sharing_unsupported_capability":
@@ -132,21 +146,21 @@ struct ChatGPTFailure: Error, Sendable {
                 "ChatGPT does not support the requested setting\(parameter.map { ": \(display($0))" } ?? ""). Choose another model or reasoning effort, then request an answer again."
         case "invalid_client":
             return
-                "The ChatGPT client registration was not accepted. Stop any active session and sign out if needed. Select Another account if available, then sign in again to register."
+                "The ChatGPT client registration was not accepted. Sign out if needed. Select Another account if available, then sign in again to register."
         case "subscription_sharing_route_not_supported":
             return
                 "ChatGPT does not support this request route. Update Skill Issue or report the problem with the error details before trying again."
         case "chatpass_v2_scope_not_authorized", "chatpass_v2_invalid_authorization_context":
             return
-                "ChatGPT permissions do not authorize this request. Stop the session and check Skill Issue's permissions in ChatGPT Settings. If the permissions are correct, report the problem with the error details."
+                "ChatGPT permissions do not authorize this request. Check Skill Issue's permissions in ChatGPT Settings. If the permissions are correct, report the problem with the error details."
         case "subscription_sharing_invalid_user":
             return
-                "ChatGPT could not verify this account's authorization. Stop the session, sign out, and sign in again."
+                "ChatGPT could not verify this account's authorization. Sign out, then sign in again."
         default:
             if isTerminalRefresh { return Self.signInRequired.message }
             if status == 401 {
                 return
-                    "ChatGPT could not verify this account's authorization. Stop the session, sign out, and sign in again."
+                    "ChatGPT could not verify this account's authorization. Sign out, then sign in again."
             }
             if status == 403 {
                 return

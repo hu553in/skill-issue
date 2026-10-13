@@ -20,7 +20,18 @@ private struct AnswerLanguage: Decodable, Sendable {
 
 @MainActor
 final class Model: ObservableObject {
-    @Published var relayURL: String
+    @Published var relayURL: String {
+        didSet {
+            guard relayURL != oldValue else { return }
+            // Invalid drafts can contain pasted credentials or private session fragments.
+            if let endpoint = viewerEndpoint { defaults.set(endpoint.origin, forKey: "relayURL") }
+            if viewerAccessEnabled { restoreViewerCredentials() }
+        }
+    }
+    @Published private(set) var viewerAccessEnabled: Bool
+    @Published private(set) var viewerCredentials: ViewerAccessCredentials?
+    @Published private(set) var viewerFailure: ViewerFailure?
+    @Published var configuringViewerAccess = false
     @Published var microphone: String
     @Published var language: String
     @Published private(set) var models: [ChatGPTModel] = []
@@ -49,13 +60,15 @@ final class Model: ObservableObject {
         }
     }
     @Published private var operation: Operation?
-    var working: Bool { operation != nil }
+    var working: Bool { terminating || operation != nil }
     var status: String {
+        if terminating { return "Quitting…" }
         if let operation { return operation.label }
         if state.live { return answering ? "Thinking…" : "Listening" }
         if account.isEmpty { return "Signed out" }
         if chatGPT.requiresSignIn { return "Sign in required" }
         if needsPlanPermission { return "Permission required" }
+        if viewerSetupRequired { return "Setup required" }
         return canStartSession ? "Ready" : "Unavailable"
     }
     var loadingModels: Bool {
@@ -77,6 +90,7 @@ final class Model: ObservableObject {
     @Published var state = ViewState()
     private let chatGPT: ChatGPT
     private let defaults: UserDefaults
+    private let viewerAccessStorage: ViewerAccessStorage
     private let capture = Capture()
     private var relay: Relay?
     private var history = InterviewHistory()
@@ -89,7 +103,7 @@ final class Model: ObservableObject {
     private var startTask: Task<Void, Never>?
     private var endingTask: Task<Void, Never>?
     private var settingsTask: Task<Void, Never>?
-    private var terminating = false
+    @Published private var terminating = false
     private var captureFailure: UUID?
     private var canUseChatGPT: Bool {
         !account.isEmpty && chatGPT.canUsePlan && !chatGPT.requiresSignIn
@@ -103,25 +117,45 @@ final class Model: ObservableObject {
         return accountLabel(saved)
     }
     var canAuthenticate: Bool {
-        !terminating && !working && !state.live && chatGPT.accountsRestored
+        !working && !state.live && chatGPT.accountsRestored
     }
     var canChooseAccount: Bool { canAuthenticate && account.isEmpty }
     var selectedModel: ChatGPTModel? { models.first { $0.slug == modelSlug } }
     var answering: Bool { state.answers.contains { $0.status == "generating" } }
-    var canSelectModel: Bool { !terminating && !working && !answering && !models.isEmpty }
+    var canSelectModel: Bool { !working && !answering && !models.isEmpty }
     var canSelectEffort: Bool { canSelectModel && !(selectedModel?.efforts.isEmpty ?? true) }
     var canStartSession: Bool {
-        guard !terminating, !working, !state.live, canUseChatGPT,
-            let model = selectedModel
+        guard !working, !state.live, canUseChatGPT,
+            let model = selectedModel, !viewerSetupRequired
         else {
             return false
         }
         return model.supportsEffort(reasoningEffort)
     }
 
-    init(chatGPT: ChatGPT = ChatGPT(), defaults: UserDefaults = .standard) {
+    var canConfigureViewer: Bool { !working && !state.live }
+    var viewerEndpoint: ViewerEndpoint? { try? ViewerEndpoint(relayURL) }
+    var viewerSetupIssue: ViewerFailure? {
+        guard let endpoint = viewerEndpoint else { return .invalidEndpoint }
+        return viewerAccessEnabled && viewerCredentials?.origin != endpoint.origin
+            ? .setupRequired : nil
+    }
+    var viewerSetupRequired: Bool { viewerSetupIssue != nil }
+    var viewerSetupWarning: ViewerFailure? {
+        error.isEmpty && catalogError.isEmpty ? viewerSetupIssue : nil
+    }
+    var viewerFailureStatus: String? {
+        viewerFailure == .accessDenied ? "Viewer access denied" : nil
+    }
+
+    init(
+        chatGPT: ChatGPT = ChatGPT(), defaults: UserDefaults = .standard,
+        viewerAccessStorage: ViewerAccessStorage = .keychain
+    ) {
         self.chatGPT = chatGPT
         self.defaults = defaults
+        self.viewerAccessStorage = viewerAccessStorage
+        viewerAccessEnabled = defaults.bool(forKey: "viewerAccessEnabled")
         relayURL = defaults.string(forKey: "relayURL") ?? "http://127.0.0.1:8787"
         microphone = defaults.string(forKey: "microphone") ?? ""
         language = defaults.string(forKey: "language") ?? "English"
@@ -133,10 +167,59 @@ final class Model: ObservableObject {
             if let failure { self.showError(failure) }
             self.publish()
         }
+        if defaults.string(forKey: "relayURL") != nil {
+            if let endpoint = viewerEndpoint {
+                defaults.set(endpoint.origin, forKey: "relayURL")
+            } else {
+                defaults.removeObject(forKey: "relayURL")
+            }
+        }
         restoreAccounts()
+        if viewerAccessEnabled { restoreViewerCredentials() }
+    }
+    func setViewerAccessEnabled(_ enabled: Bool) {
+        guard canConfigureViewer else { return }
+        viewerAccessEnabled = enabled
+        defaults.set(enabled, forKey: "viewerAccessEnabled")
+        if enabled {
+            restoreViewerCredentials()
+        } else if viewerFailure != nil {
+            clearFeedback()
+        }
+    }
+    private func restoreViewerCredentials() {
+        guard let endpoint = viewerEndpoint else {
+            viewerCredentials = nil
+            return
+        }
+        do {
+            let credentials = try viewerAccessStorage.load(endpoint.origin)
+            try credentials?.validate(for: endpoint)
+            viewerCredentials = credentials
+            if viewerFailure == .credentialsUnavailable { clearFeedback() }
+        } catch {
+            viewerCredentials = nil
+            showError(ViewerFailure.credentialsUnavailable)
+        }
+    }
+    func configureViewerAccess() {
+        guard canConfigureViewer, viewerAccessEnabled, viewerEndpoint != nil else { return }
+        restoreViewerCredentials()
+        configuringViewerAccess = true
+    }
+    func saveViewerAccess(_ credentials: ViewerAccessCredentials) throws {
+        guard canConfigureViewer, viewerAccessEnabled,
+            credentials.origin == viewerEndpoint?.origin
+        else { throw ViewerFailure.setupRequired }
+        guard let endpoint = viewerEndpoint else { throw ViewerFailure.invalidEndpoint }
+        try credentials.validate(for: endpoint)
+        try viewerAccessStorage.save(credentials)
+        viewerCredentials = credentials
+        if viewerFailure != nil { clearFeedback() }
+        configuringViewerAccess = false
     }
     private func restoreAccounts() {
-        guard !terminating, !working, !state.live else { return }
+        guard !working, !state.live else { return }
         operation = .restoringAccounts
         clearFeedback()
         settingsTask = Task {
@@ -247,6 +330,7 @@ final class Model: ObservableObject {
         error = ""
         catalogError = ""
         feedback = nil
+        viewerFailure = nil
         state.error = ""
     }
     var recovery: ChatGPTFailure.Recovery {
@@ -256,6 +340,12 @@ final class Model: ObservableObject {
         return recovery
     }
     var recoveryTitle: String? {
+        if let viewerFailure {
+            if viewerFailure == .generic { return "Retry" }
+            return viewerFailure == .invalidEndpoint
+                ? nil
+                : viewerAccessEnabled ? "Configure…" : "Enable Access"
+        }
         switch recovery {
         case .restore, .save: return "Retry"
         case .signIn: return "Sign in again"
@@ -267,29 +357,35 @@ final class Model: ObservableObject {
         }
     }
     var canRetryModels: Bool {
-        !terminating && !working && !state.live && canUseChatGPT
+        !working && !state.live && canUseChatGPT
     }
     var canRecover: Bool {
+        if let viewerFailure {
+            return viewerFailure == .generic
+                ? canStartSession
+                : viewerFailure != .invalidEndpoint && canConfigureViewer && viewerEndpoint != nil
+        }
         switch recovery {
-        case .restore: return !terminating && !working && !state.live
-        case .save: return !terminating && !working
-        case .signIn, .enablePlan: return !terminating && !working && !state.live
+        case .restore: return !working && !state.live
+        case .save: return !working
+        case .signIn, .enablePlan: return !working && !state.live
         case .usage, .settings: return true
         case .retry:
             return state.live ? canAnswer : canRetryModels
         case .configuration, .none: return false
         }
     }
-    var recoveryHint: String {
-        guard state.live else { return "" }
-        switch recovery {
-        case .signIn: return "Stop the session to sign in again."
-        case .enablePlan: return "Stop the session to enable ChatGPT plan usage."
-        default: return ""
-        }
-    }
     func recover() {
         guard canRecover else { return }
+        if viewerFailure != nil {
+            if viewerFailure == .generic {
+                startSession()
+                return
+            }
+            if !viewerAccessEnabled { setViewerAccessEnabled(true) }
+            configureViewerAccess()
+            return
+        }
         switch recovery {
         case .restore: restoreAccounts()
         case .save:
@@ -360,7 +456,7 @@ final class Model: ObservableObject {
         captureFailure = nil
         state = ViewState(fontSize: state.fontSize, language: language)
         for (key, value) in [
-            "relayURL": relayURL, "microphone": microphone, "language": language,
+            "microphone": microphone, "language": language,
         ] { defaults.set(value, forKey: key) }
         startTask = Task { [self] in
             defer { startTask = nil }
@@ -380,7 +476,8 @@ final class Model: ObservableObject {
                 try Task.checkCancellation()
                 operation = .starting("Connecting viewer…")
                 let relay = try await Relay.create(
-                    url: relayURL.trimmingCharacters(in: .whitespacesAndNewlines))
+                    url: relayURL.trimmingCharacters(in: .whitespacesAndNewlines),
+                    credentials: viewerAccessEnabled ? viewerCredentials : nil)
                 self.relay = relay
                 link = relay.viewerURL
                 try Task.checkCancellation()
@@ -394,6 +491,10 @@ final class Model: ObservableObject {
                     self.viewerDelivery =
                         connected && count > 0
                         ? applied == count ? "Controls synced" : "Syncing controls…" : ""
+                }
+                relay.onFailure = { [weak self] error in
+                    guard let self, self.sessionID == session else { return }
+                    self.endSession(failed: true, error: error)
                 }
                 operation = .starting("Starting capture…")
                 try await capture.start(
@@ -438,7 +539,10 @@ final class Model: ObservableObject {
     }
     @discardableResult
     func endSession(failed: Bool = false, error: Error? = nil) -> Task<Void, Never> {
-        if failed { showError(error ?? AppFailure.failed) }
+        if failed {
+            state.live = false
+            showError(error ?? AppFailure.failed)
+        }
         if let endingTask { return endingTask }
         operation = .stopping
         state.live = false
@@ -576,13 +680,19 @@ final class Model: ObservableObject {
         syncAccount()
         let failure = cause as? ChatGPTFailure
         feedback = failure
+        viewerFailure = cause as? ViewerFailure
         let message =
-            (catalog ? failure?.catalogMessage : failure?.message)
+            viewerFailure?.message
+            ?? (catalog
+                ? failure?.catalogMessage : failure?.message ?? (cause as? AppFailure)?.message)
             ?? (catalog ? "Could not load ChatGPT models. Retry." : failureMessage)
         error = catalog ? "" : message
         catalogError = catalog ? message : ""
         state.error = message
         state.canAnswer = canAnswer
+        if state.live && (failure?.stopsSession == true || viewerFailure?.stopsSession == true) {
+            endSession()
+        }
     }
     private func captureFailed(session: UUID) {
         guard sessionID == session else { return }
@@ -620,7 +730,8 @@ private struct SettingsView: View {
         model.state.answers.firstIndex { $0.id == model.state.selectedID } ?? -1
     }
     private var feedbackMessages: [String] {
-        [model.error, model.catalogError].filter { !$0.isEmpty }
+        let messages = [model.error, model.catalogError].filter { !$0.isEmpty }
+        return messages.isEmpty ? model.viewerSetupWarning.map { [$0.message] } ?? [] : messages
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -628,7 +739,9 @@ private struct SettingsView: View {
                 status: model.status, working: model.working, live: model.state.live,
                 answering: model.answering,
                 canStart: model.canStartSession,
-                error: model.error, catalogError: model.catalogError, feedback: model.feedback
+                error: model.error, catalogError: model.catalogError, feedback: model.feedback,
+                failureStatus: model.viewerFailureStatus,
+                setupRequired: model.viewerSetupWarning != nil
             )
             .fixedSize(horizontal: false, vertical: true)
             ViewThatFits(in: .vertical) {
@@ -650,6 +763,11 @@ private struct SettingsView: View {
                 ])
         }
         .padding(26).frame(width: 520).frame(maxHeight: maximumHeight)
+        .sheet(isPresented: $model.configuringViewerAccess) {
+            ViewerAccessConfiguration(
+                origin: model.viewerEndpoint?.origin ?? "",
+                credentials: model.viewerCredentials, save: model.saveViewerAccess)
+        }
         // Size the AppKit window to the content after applying the screen height limit.
         .fixedSize(horizontal: true, vertical: true)
     }
@@ -657,12 +775,22 @@ private struct SettingsView: View {
         let retry: (() -> Void)? =
             !model.catalogError.isEmpty && model.recovery == .usage
             ? { model.retryModels() } : nil
-        return SettingsErrorNotice(
+        let setup = model.viewerSetupWarning
+        let actionTitle: String?
+        if let setup {
+            actionTitle = setup == .setupRequired ? "Configure…" : nil
+        } else {
+            actionTitle = model.recoveryTitle
+        }
+        return SettingsNotice(
             messages: feedbackMessages,
-            warning: model.feedback?.isWarning ?? false,
-            diagnostic: model.feedback?.diagnostic ?? "",
-            actionTitle: model.recoveryTitle, actionHint: model.recoveryHint,
-            actionDisabled: !model.canRecover, action: model.recover,
+            warning: setup != nil || model.feedback?.isWarning == true,
+            diagnostic: setup == nil ? model.feedback?.diagnostic ?? "" : "",
+            actionTitle: actionTitle,
+            actionDisabled: setup != nil ? !model.canConfigureViewer : !model.canRecover,
+            action: {
+                if setup != nil { model.configureViewerAccess() } else { model.recover() }
+            },
             retryModels: retry, retryModelsDisabled: !model.canRetryModels,
             detailsExpanded: $detailsExpanded)
     }
@@ -674,7 +802,8 @@ private struct SettingsView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("ChatGPT").font(.headline)
                 if !model.account.isEmpty {
-                    Text(model.activeAccountLabel).font(.subheadline).foregroundStyle(.secondary)
+                    Text(model.activeAccountLabel).font(.subheadline)
+                        .foregroundStyle(Color(nsColor: SettingsColors.secondaryText))
                 } else if !model.savedAccounts.isEmpty {
                     Picker(
                         "Account",
@@ -732,7 +861,19 @@ private struct SettingsView: View {
                 }.disabled(model.working || model.state.live)
                 LabeledContent("Viewer endpoint") {
                     TextField("https://…", text: $model.relayURL).textFieldStyle(.roundedBorder)
-                }.disabled(model.working || model.state.live)
+                }.disabled(!model.canConfigureViewer)
+                HStack(spacing: 12) {
+                    Toggle(
+                        "Use Cloudflare Access",
+                        isOn: Binding(
+                            get: { model.viewerAccessEnabled }, set: model.setViewerAccessEnabled)
+                    ).toggleStyle(.switch).fixedSize()
+                    if model.viewerAccessEnabled {
+                        Button("Configure…", action: model.configureViewerAccess)
+                            .disabled(model.viewerEndpoint == nil)
+                    }
+                    Spacer(minLength: 0)
+                }.disabled(!model.canConfigureViewer)
             }
             if let link = model.link {
                 HStack(spacing: 18) {
@@ -740,15 +881,16 @@ private struct SettingsView: View {
                         Image(nsImage: qr).interpolation(.none).resizable().frame(
                             width: 104, height: 104
                         ).padding(8).background(.white).clipShape(RoundedRectangle(cornerRadius: 8))
+                            .accessibilityLabel("Private viewer QR code")
                     }
                     VStack(alignment: .leading, spacing: 8) {
                         Text(model.viewerStatus).font(.headline)
                         if !model.viewerDelivery.isEmpty {
-                            Text(model.viewerDelivery).font(.subheadline).foregroundStyle(
-                                .secondary)
+                            Text(model.viewerDelivery).font(.subheadline)
+                                .foregroundStyle(Color(nsColor: SettingsColors.secondaryText))
                         }
                         Text("Keep this private session link to yourself.").font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Color(nsColor: SettingsColors.secondaryText))
                         HStack {
                             Button("Open viewer", action: model.openViewer)
                             Button("Copy link", action: model.copyLink)

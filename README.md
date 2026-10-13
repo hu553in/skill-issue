@@ -42,9 +42,10 @@ To read answers on your phone, deploy the viewer and relay to your own Cloudflar
 limits and billing apply. The server needs no ChatGPT credentials, tunnels or open ports on your
 Mac.
 
-Room creation is currently public and IP-rate-limited. Encryption protects existing sessions, but
-anyone who can reach the server can create their own rooms. Private server access is tracked in
-[#9](https://github.com/hu553in/skill-issue/issues/9).
+Cloudflare Access is optional. Without it, room creation is public and IP-rate-limited: encryption
+protects existing sessions, but anyone who can reach the server can create their own rooms and use
+your deployment's resources. To restrict the whole deployment to your Mac and approved browser
+users, follow [Cloudflare Access](#cloudflare-access).
 
 ### Deploy to Cloudflare
 
@@ -83,6 +84,61 @@ bun deploy
 Update the app and Worker together; mixed old and new versions are not supported. Start a new
 session after updating both.
 
+### Cloudflare Access
+
+Configure Access separately from deploying the Worker. The Deploy to Cloudflare button and
+`bun deploy` publish the same application; neither creates Access policies or service credentials.
+
+1. Enable Zero Trust in your Cloudflare account. In
+   [Access applications](https://one.dash.cloudflare.com/?to=%2F%3Aaccount%2Faccess%2Fapps), create
+   a **Self-hosted and private** application with a public hostname matching your viewer endpoint.
+   Protect the entire hostname, with no path restriction. Your `workers.dev` address works; a custom
+   domain is optional. Use **hostname-based** protection: Worker-level Access currently rejects
+   WebSocket connections. See
+   [Cloudflare's Workers Access guide](https://developers.cloudflare.com/workers/configuration/cloudflare-access/).
+2. Create an **Allow** policy containing only the email addresses you approve for the browser
+   viewer. Enable **One-time PIN** as a login method to receive a code by email, or use an identity
+   provider you already have configured.
+3. In
+   [Service tokens](https://one.dash.cloudflare.com/?to=%2F%3Aaccount%2Faccess%2Fservice-auth%2Fservice-tokens),
+   create a token for this Mac and copy its **Client ID** and **Client Secret**. Add a **Service
+   Auth** policy to the same application, allowing that specific token. Do not use an Allow or
+   Bypass policy for the Mac token. Cloudflare shows the secret only when it is created; see
+   [service token management](https://developers.cloudflare.com/cloudflare-one/access-controls/service-credentials/service-tokens/).
+4. Protect every hostname that can reach the Worker, or disable the extra routes. If using only a
+   custom domain, disable the unprotected `workers.dev` route and set `workers_dev: false` in your
+   checkout's `wrangler.jsonc` so later deploys keep it disabled. Preview URLs are disabled in the
+   project configuration; keep preview builds disabled in Cloudflare too.
+5. In Skill Issue Settings, set the protected **Viewer endpoint**, enable **Use Cloudflare Access**,
+   choose **Configure**, paste the Client ID and Client Secret, then save. Open the endpoint in your
+   phone browser and sign in before starting your first session. Then open the full session link or
+   scan its QR code. If you first sign in through a QR link and Cloudflare returns to a page asking
+   for the private viewer link, reopen the same link or scan its QR code again. Cloudflare can drop
+   the URL fragment before the viewer has loaded.
+
+The app stores service credentials in Keychain for the exact endpoint. Turning the switch off keeps
+them saved but stops sending them; it does not disable server protection in Cloudflare. Changing the
+endpoint does not send credentials saved for a different server. The switch and Configure are locked
+during a session or operation. When Access is enabled without saved credentials, the app shows
+**Setup required** and prevents Start.
+
+Missing Access credentials and invalid viewer endpoints appear in the shared warning below the app
+title. Missing credentials offer **Configure**; an invalid endpoint explains the accepted address
+format. Setup warnings clear when the configuration is valid; turning Access off also clears the
+missing-credentials warning. Operation errors take priority over setup warnings.
+
+For expired, revoked or denied credentials, fix the token or Service Auth policy and update
+**Configure**. A confirmed Access refusal during a Mac request or reconnection stops the session and
+unlocks Settings; existing answers remain available until the next Start. An already open WebSocket
+does not reauthenticate until it reconnects. Temporary network interruptions continue to reconnect.
+The app never turns Access off or retries without credentials automatically. If browser
+authorization expires, choose **Sign in** in the viewer to authenticate again; the Mac's session
+continues.
+
+For local development, leave **Use Cloudflare Access** off. Remote endpoints require HTTPS; HTTP is
+accepted only for loopback development addresses. Service credentials are never included in the
+session link, QR code or browser viewer.
+
 ## Usage
 
 1. Open Settings, sign in with ChatGPT, and choose your microphone and answer language.
@@ -94,8 +150,8 @@ session after updating both.
 4. Open the session link on your phone or scan its QR code. Keep the browser in the foreground and
    the phone unlocked; Screen Wake Lock is best effort.
 
-Microphone, answer language and viewer endpoint are locked while listening. Answer language defaults
-to English and is independent of speech recognition.
+Microphone, answer language, viewer endpoint and Cloudflare Access settings are locked while
+listening. Answer language defaults to English and is independent of speech recognition.
 
 **Model** and **Reasoning effort** load from your ChatGPT account after sign-in. The default model
 is `gpt-6-luna`, or the first available model; effort defaults to `low`, or the first supported
@@ -128,9 +184,10 @@ Temporary failures offer **Retry** or **Request answer**. Usage limits offer **V
 your app and plan limits before requesting another answer with the button or shortcut. Requests
 never retry automatically. Existing answers and captured context stay available during recovery. You
 can change the model and reasoning effort between requests without restarting the session; both
-selectors stay disabled while an answer is being prepared or generated. If authorization expires
-while listening, stop the session before signing in again. A new session clears its predecessor's
-answers and captured context.
+selectors stay disabled while an answer is being prepared or generated. If ChatGPT requires a new
+sign-in or permission to use your plan while listening, the session stops automatically and the
+recovery action becomes available. A new session clears its predecessor's answers and captured
+context.
 
 If a usage limit prevents loading models, choose **View usage** to check your limits, then **Retry**
 to reload the catalog.
@@ -175,13 +232,17 @@ visible. Reopen the app to show Settings if its icon is hidden.
 - History stays in memory, including after request errors. There is no automatic truncation; long
   sessions can reach the model's context limit. The app does not save recordings or screenshots to
   disk. Model files remain cached in `~/Library/Application Support/Skill Issue/Models/`.
-- Viewer snapshots use AES-256-GCM; the key stays in the link's URL fragment. The relay stores
-  encrypted state. Readers cannot publish state or control the Mac. Anyone with the full link can
-  read the session, and the link remains in browser history.
+- Viewer snapshots use AES-256-GCM; the key is carried in the link's URL fragment and is never sent
+  to the relay. The relay stores encrypted state. Readers cannot publish state or control the Mac.
+  Anyone with the full link can read the session unless Cloudflare Access additionally restricts
+  browser access. The link remains in browser history. Access service credentials stay in Keychain
+  and are sent only to their configured origin (HTTPS, or loopback HTTP for local development), with
+  redirects blocked.
 - Stop, Quit and fatal session errors stop capture and request room deletion. Failed deletion shows
   an error; an abandoned room expires after two hours without publisher activity. Active sessions
-  renew it. The browser stores reading positions, not answer text. There are no analytics or
-  third-party page assets.
+  renew it. The browser stores reading positions, not answer text. During Cloudflare Access sign-in,
+  the tab also temporarily stores the private viewer link to restore its fragment afterward. There
+  are no analytics or third-party page assets.
 
 ## Development
 

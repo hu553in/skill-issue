@@ -1,7 +1,9 @@
 import { connect } from "node:net";
 
+import { base64 } from "@scure/base";
+
 import type { ViewState } from "../../protocol";
-import { acknowledgment, decrypt, empty, unbase64 } from "../../web/session";
+import { acknowledgment, decrypt, empty } from "../../web/session";
 import { expect, test } from "./fixtures";
 import { Peer } from "./peer";
 
@@ -88,7 +90,7 @@ test("large snapshots, replacement snapshots and per-reader acknowledgments surv
   );
   const ack = await relay.writer.next("ack");
   expect(ack.client).toBe(first.client);
-  const bytes = unbase64(ack.box);
+  const bytes = base64.decode(ack.box);
   const open = async (client: string) =>
     await crypto.subtle.decrypt(
       {

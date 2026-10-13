@@ -1,11 +1,30 @@
 import CryptoKit
 import Foundation
+import SimpleKeychain
 
-enum AppFailure: Error { case failed }
+enum AppFailure: Error {
+    case failed, microphonePermission, screenCapturePermission
+
+    var message: String {
+        switch self {
+        case .failed: return failureMessage
+        case .microphonePermission:
+            return
+                "Allow Skill Issue in System Settings > Privacy & Security > Microphone, then start the session again."
+        case .screenCapturePermission:
+            return
+                "Allow Skill Issue in System Settings > Privacy & Security > Screen & System Audio Recording. Quit and reopen the app if macOS asks, then start the session again."
+        }
+    }
+}
 let failureMessage = "Couldn't complete that. Try again."
 let shortcutModifiers = "⌃⌥⌘"
 let fontSizeRange = 16...40
 let maximumPacket = 4_000_000
+
+// Preserve the existing macOS Keychain backend so saved records remain readable.
+let credentialKeychain = SimpleKeychain(
+    service: "com.github.hu553in.skill-issue", accessibility: .afterFirstUnlockThisDeviceOnly)
 
 extension Data {
     static func random() -> Data { SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) } }
