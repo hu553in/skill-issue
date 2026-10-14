@@ -4,6 +4,7 @@ import SimpleKeychain
 
 enum AppFailure: Error {
     case failed, microphonePermission, screenCapturePermission
+    case shortcutUnavailable(String)
 
     var message: String {
         switch self {
@@ -14,11 +15,12 @@ enum AppFailure: Error {
         case .screenCapturePermission:
             return
                 "Allow Skill Issue in System Settings > Privacy & Security > Screen & System Audio Recording. Quit and reopen the app if macOS asks, then start the session again."
+        case .shortcutUnavailable(let shortcut):
+            return "\(shortcut) is already used by another app. Choose other modifier keys."
         }
     }
 }
 let failureMessage = "Couldn't complete that. Try again."
-let shortcutModifiers = "⌃⌥⌘"
 let fontSizeRange = 16...40
 let maximumPacket = 4_000_000
 
@@ -28,6 +30,29 @@ let credentialKeychain = SimpleKeychain(
 
 extension Data {
     static func random() -> Data { SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) } }
+}
+
+struct ShortcutModifiers: OptionSet, Sendable {
+    let rawValue: Int
+    static let control = Self(rawValue: 1 << 0)
+    static let option = Self(rawValue: 1 << 1)
+    static let shift = Self(rawValue: 1 << 2)
+    static let command = Self(rawValue: 1 << 3)
+    static let standard: Self = [.control, .option, .command]
+    // Apple's display order. Carbon hot keys support no other modifiers.
+    static let ordered: [(modifier: Self, symbol: String, name: String, image: String)] = [
+        (.control, "⌃", "Control", "control"), (.option, "⌥", "Option", "option"),
+        (.shift, "⇧", "Shift", "shift"), (.command, "⌘", "Command", "command"),
+    ]
+
+    var symbols: String { Self.ordered.filter { contains($0.modifier) }.map(\.symbol).joined() }
+    var names: String {
+        Self.ordered.filter { contains($0.modifier) }.map(\.name).joined(separator: " + ")
+    }
+    // A single global modifier would take over typing and system shortcuts such as ⌘Space.
+    var isValid: Bool {
+        isSubset(of: [.control, .option, .shift, .command]) && rawValue.nonzeroBitCount >= 2
+    }
 }
 
 enum AudioSource: String, Codable, Sendable { case computer, microphone }
@@ -61,8 +86,7 @@ struct ViewState: Codable, Equatable, Sendable {
     var fontSize = 20
     var language = "English"
     // Codable sends the shortcut reminder to the web viewer.
-    // swiftlint:disable:next unused_declaration
-    var modifiers = shortcutModifiers
+    var modifiers = ShortcutModifiers.standard.symbols
     var error = ""
 
     mutating func select(_ offset: Int) {

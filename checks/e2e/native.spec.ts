@@ -105,6 +105,7 @@ test("native relay confirms history, zoom and scroll without conflating viewer p
   }
   const fixturePath = testInfo.outputPath("native-fixture.json");
   let peer: Peer | undefined;
+  let nativeFailure: Error | undefined;
   const controller = new AbortController();
   const execution = (async () => {
     try {
@@ -115,7 +116,8 @@ test("native relay confirms history, zoom and scroll without conflating viewer p
         }),
       };
     } catch (error) {
-      return { error, ok: false as const };
+      nativeFailure = error instanceof Error ? error : new Error(String(error));
+      return { error: nativeFailure, ok: false as const };
     }
   })();
   try {
@@ -268,6 +270,9 @@ test("native relay confirms history, zoom and scroll without conflating viewer p
       throw result.error;
     }
     expect(result.output.stderr).toBe("");
+  } catch (error) {
+    // A stopped probe cannot advance a fixture or send the next packet.
+    throw nativeFailure ?? error;
   } finally {
     controller.abort();
     await execution;

@@ -245,7 +245,9 @@ saved for repeat sign-in. If OpenAI cannot confirm remote sign-out, use
 
 ### Keyboard shortcuts
 
-Hold **Control + Option + Command** for all commands:
+Hold **Control + Option + Command** for all commands. To use other modifier keys, stop the session
+and choose **Change…** next to **Controls**. Pick at least two keys; the choice survives app
+restarts and updates every shortcut hint, including the viewer.
 
 | Key   | Action                                                       |
 | ----- | ------------------------------------------------------------ |
@@ -261,7 +263,7 @@ position. **Thinking** refers to the current request, including when you read an
 - **Request again:** Space cancels the current generation and captures fresh context. Its partial
   answer stays in history. Holding Space does not repeat requests.
 - **Text size:** starts at 20, changes by 2 from 16 to 40, and survives app restarts. The +/= key
-  works with or without Shift.
+  also accepts an extra Shift when Shift is not part of your chosen modifiers.
 - **Hide the icon:** H hides the app's icon; macOS capture indicators remain visible. Reopen the app
   to show Settings when the icon is hidden.
 - **Quit:** the button and Command + Q ask for confirmation. Cancel keeps the session running.

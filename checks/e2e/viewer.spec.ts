@@ -1729,6 +1729,57 @@ test("failed answers retain scoped recovery guidance after a later request clear
   );
 });
 
+for (const card of [
+  undefined,
+  { id: "retained", status: "incomplete", text: "A partial answer." },
+  { id: "retained", status: "complete", text: "A complete answer." },
+  { id: "retained", status: "failed", text: "" },
+] as const) {
+  test(`session end gives one recovery instruction (${card?.status ?? "empty"} answer)`, async ({
+    page,
+    relay,
+  }) => {
+    const error = card?.status === "failed" ? "" : "Quota exceeded";
+    await relay.publish({
+      ...empty,
+      answers: card ? [card] : [],
+      canAnswer: true,
+      error,
+      live: true,
+      selectedID: card?.id,
+    });
+    await page.goto(await relay.viewerURL());
+    await expect(page.getByRole("status")).toHaveText("Listening");
+    const pane = page.getByRole("region", { exact: true, name: "Answer" });
+    const notice = pane.locator(".error").filter({
+      hasText: "Could not complete",
+    });
+    await expect(notice).toContainText(
+      error
+        ? "Check the error in Settings on your Mac, then request another answer."
+        : "Request another answer on your Mac."
+    );
+    await relay.end();
+    await expect(page.getByRole("status")).toHaveText("Session ended");
+    const hasAnswer = card !== undefined && card.text !== "";
+    const restart = "Start a new session on your Mac and open its viewer link.";
+    const message = error
+      ? "Could not complete the request."
+      : "Could not complete this answer.";
+    await expect(notice).toHaveText(
+      hasAnswer ? `${message} ${restart}` : message
+    );
+    await expect(pane.getByText(restart, { exact: false })).toHaveCount(1);
+    await expect(pane).not.toContainText("Check Settings");
+    await expect(page.locator("footer")).toHaveCount(0);
+    await (hasAnswer
+      ? expect(pane.locator("article")).toContainText(card.text)
+      : expect(
+          pane.getByRole("heading", { name: "Session ended." })
+        ).toBeVisible());
+  });
+}
+
 test("recovery changes keep partial answers, anchors and scrolling usable", async ({
   page,
   relay,

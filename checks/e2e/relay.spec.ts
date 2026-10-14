@@ -1,4 +1,5 @@
-import { connect } from "node:net";
+import { once } from "node:events";
+import { connect, createServer } from "node:net";
 
 import { base64 } from "@scure/base";
 
@@ -18,6 +19,11 @@ async function silentPeer(base: string, room: string, ip: string) {
     socket.destroy(new Error("Timed out opening the silent WebSocket"));
   });
   socket.once("error", response.reject);
+  socket.once("close", () => {
+    if (!upgraded) {
+      response.reject(new Error("Socket closed before the HTTP response"));
+    }
+  });
   socket.once("connect", () => {
     socket.write(
       `GET /rooms/${room}/socket HTTP/1.1\r\nHost: ${url.host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nCF-Connecting-IP: ${ip}\r\n\r\n`
@@ -40,12 +46,37 @@ async function silentPeer(base: string, room: string, ip: string) {
       response.resolve(status);
     }
   });
-  const status = await response.promise;
-  return {
-    socket,
-    status,
-  };
+  try {
+    const status = await response.promise;
+    return { socket, status };
+  } catch (error) {
+    socket.destroy();
+    throw error;
+  }
 }
+
+test("silent peers report a truncated HTTP response instead of hanging", async () => {
+  const server = createServer((socket) => {
+    socket.end("HTTP/1.1 400 Bad Request\r\n");
+  });
+  server.listen(0, "127.0.0.1");
+  try {
+    await once(server, "listening");
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("The fixture did not bind a TCP port");
+    }
+    await expect(
+      silentPeer(
+        `http://127.0.0.1:${address.port}`,
+        "00000000-0000-0000-0000-000000000001",
+        "192.0.2.1"
+      )
+    ).rejects.toThrow("Socket closed before the HTTP response");
+  } finally {
+    server.close();
+  }
+});
 
 test("queued snapshot packets are delivered once and in order", async ({
   relay,
@@ -183,7 +214,7 @@ test("unauthorized raw sockets are denied before upgrade across repeated no-clos
     for (let wave = 0; wave < 3; wave += 1) {
       // Distinct fixture IPs isolate authorization from the per-IP rate quota.
       // oxlint-disable-next-line no-await-in-loop
-      const peers = await Promise.all(
+      const results = await Promise.allSettled(
         Array.from(
           { length: 30 },
           async (_, index) =>
@@ -194,7 +225,15 @@ test("unauthorized raw sockets are denied before upgrade across repeated no-clos
             )
         )
       );
+      const peers = results.flatMap((result) =>
+        result.status === "fulfilled" ? [result.value] : []
+      );
       attempts.push(...peers);
+      for (const result of results) {
+        if (result.status === "rejected") {
+          throw result.reason;
+        }
+      }
       expect(peers.map((peer) => peer.status)).toEqual(
         Array.from({ length: 30 }, () => 400)
       );

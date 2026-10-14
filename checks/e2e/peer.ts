@@ -1,3 +1,4 @@
+import { assert, looseObject, string } from "valibot";
 import { WebSocket } from "ws";
 
 import type { Packet } from "../../protocol";
@@ -10,6 +11,7 @@ type Message =
   | { type: "offline" }
   | { type: "ended" };
 type TypedMessage<T extends Message["type"]> = Extract<Message, { type: T }>;
+const MessageEnvelopeSchema = looseObject({ type: string() });
 export class Peer {
   readonly socket: WebSocket;
   readonly closed: Promise<WebSocket.CloseEvent>;
@@ -41,10 +43,17 @@ export class Peer {
       { once: true }
     );
     this.socket.addEventListener("message", (event) => {
-      if (typeof event.data !== "string") {
-        throw new TypeError("Expected a text WebSocket packet");
+      try {
+        if (typeof event.data !== "string") {
+          throw new TypeError("Expected a text WebSocket packet");
+        }
+        const message = JSON.parse(event.data) as Message;
+        assert(MessageEnvelopeSchema, message);
+        this.messages.push(message);
+      } catch (error) {
+        this.failure =
+          error instanceof Error ? error : new Error(String(error));
       }
-      this.messages.push(JSON.parse(event.data) as Message);
       this.notify();
     });
     this.socket.on("error", (error) => {

@@ -91,6 +91,7 @@ struct SettingsNotice: View {
     let retryModels: (() -> Void)?
     let retryModelsDisabled: Bool
     @Binding var detailsExpanded: Bool
+    var disabledHelp = ""
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
@@ -117,9 +118,11 @@ struct SettingsNotice: View {
                 VStack(spacing: 8) {
                     if let actionTitle {
                         Button(actionTitle, action: action).disabled(actionDisabled)
+                            .help(actionDisabled ? disabledHelp : "")
                     }
                     if let retryModels {
                         Button("Retry", action: retryModels).disabled(retryModelsDisabled)
+                            .help(retryModelsDisabled ? disabledHelp : "")
                     }
                 }
             }

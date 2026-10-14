@@ -23,6 +23,44 @@ import Testing
     }
 }
 
+@Test func shortcutModifiersUseAppleOrderAndNeedTwoKnownKeys() {
+    let all: ShortcutModifiers = [.command, .shift, .option, .control]
+    #expect(all.symbols == "⌃⌥⇧⌘" && all.names == "Control + Option + Shift + Command")
+    #expect(ShortcutModifiers.standard.symbols == ViewState().modifiers)
+    #expect(ViewState().modifiers == "⌃⌥⌘")
+    #expect(ShortcutKey.space.hint([.option, .command]) == "Option + Command + Space")
+    #expect(!ShortcutModifiers().isValid && !ShortcutModifiers.shift.isValid)
+    #expect(ShortcutModifiers([.shift, .command]).isValid && all.isValid)
+    #expect(!ShortcutModifiers(rawValue: 1 << 4 | 1 << 0).isValid)
+}
+
+@Test func modifierRecordingCommitsAnActuallyHeldCombinationOnRelease() {
+    var recording = ModifierRecording()
+    #expect(recording.update(.control) == nil)
+    #expect(recording.update([.control, .option]) == nil)
+    #expect(recording.update(.control) == nil)
+    #expect(recording.update([.control, .shift]) == nil)
+    #expect(recording.update(.shift) == nil)
+    #expect(recording.update([]) == [.control, .shift])
+    #expect(recording.peak.isEmpty)
+}
+
+@Test func modifierRecordingDiscardsNavigationAndReleasesAfterFocusChanges() {
+    var recording = ModifierRecording()
+    _ = recording.update(.shift)
+    recording.cancel()
+    #expect(recording.update([]) == nil)
+    recording = ModifierRecording(held: [.shift, .command])
+    #expect(recording.update(.command) == nil)
+    #expect(recording.update([]) == nil)
+    _ = recording.update([.control, .option])
+    recording.cancel()
+    #expect(recording.update(.control) == nil)
+    #expect(recording.update([]) == nil)
+    _ = recording.update([.shift, .command])
+    #expect(recording.update([]) == [.shift, .command])
+}
+
 @Test func base64URLWireVectors() {
     let vectors: [(Data, String)] = [
         (Data(), ""), (Data("f".utf8), "Zg"), (Data("fo".utf8), "Zm8"),

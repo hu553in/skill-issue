@@ -487,11 +487,11 @@ const App = () => {
   const answerPosition =
     index === -1 ? "No answers yet" : `${index + 1} / ${state.answers.length}`;
   const canRequest = state.canAnswer && listening;
-  let failedAnswerGuide = "Check Settings on your Mac to continue.";
+  let recoveryGuide = "Check Settings on your Mac to continue.";
   if (sessionEnded) {
-    failedAnswerGuide = restartGuide;
+    recoveryGuide = hasAnswer ? restartGuide : "";
   } else if (canRequest) {
-    failedAnswerGuide = "Request another answer on your Mac.";
+    recoveryGuide = "Request another answer on your Mac.";
   }
   let answerHeading = "Waiting for your Mac.";
   let answerGuide: ReactNode =
@@ -584,7 +584,7 @@ const App = () => {
             Could not complete the request.{" "}
             {canRequest
               ? "Check the error in Settings on your Mac, then request another answer."
-              : "Check Settings on your Mac to continue."}
+              : recoveryGuide}
           </p>
         )}
         <article className="answer" lang={answerLanguage?.tag} aria-busy={busy}>
@@ -603,7 +603,7 @@ const App = () => {
           )}
           {card?.status === "failed" && !state.error && !viewerFailed && (
             <p className="error" lang="en" data-anchor="error">
-              Could not complete this answer. {failedAnswerGuide}
+              Could not complete this answer. {recoveryGuide}
             </p>
           )}
         </article>

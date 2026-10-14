@@ -6,14 +6,31 @@ struct SettingsControls: View {
     let canGoBack: Bool
     let canGoForward: Bool
     let fontSize: Int
+    let modifiers: ShortcutModifiers
+    let canChangeModifiers: Bool
+    let changeModifiersHelp: String
     let answer: () -> Void
     let navigate: (Int) -> Void
     let scroll: (Int) -> Void
     let zoom: (Int) -> Void
+    let changeModifiers: () -> Void
 
     var body: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    Text("Controls").font(.headline).accessibilityAddTraits(.isHeader)
+                    Spacer(minLength: 0)
+                    HStack(alignment: .firstTextBaseline, spacing: 5) {
+                        Text("Hold")
+                        ShortcutModifierSymbols(modifiers: modifiers)
+                    }.font(.subheadline)
+                        .foregroundStyle(Color(nsColor: SettingsColors.secondaryText))
+                        .accessibilityElement(children: .combine)
+                    Button("Change…", action: changeModifiers).disabled(!canChangeModifiers)
+                        .help(changeModifiersHelp)
+                        .accessibilityLabel("Change shortcut modifiers")
+                }
                 if live {
                     answerButton.buttonStyle(.borderedProminent)
                 } else {
@@ -42,16 +59,6 @@ struct SettingsControls: View {
                     ) { zoom(1) }
                 }
             }.frame(maxWidth: .infinity, alignment: .leading)
-        } label: {
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                Text("Controls").font(.headline).accessibilityAddTraits(.isHeader)
-                HStack(alignment: .firstTextBaseline, spacing: 5) {
-                    Text("Hold")
-                    ShortcutModifiers()
-                }.font(.subheadline)
-                    .foregroundStyle(Color(nsColor: SettingsColors.secondaryText))
-                Spacer(minLength: 0)
-            }
         }
         .groupBoxStyle(ControlsGroupBoxStyle())
         .buttonStyle(.bordered)
@@ -68,8 +75,9 @@ struct SettingsControls: View {
             shortcutLabel(title, key: key)
         }
         .disabled(!enabled)
+        // The tooltip doubles as the accessibility hint, so it keeps the shortcut while live.
+        .help(live ? key.hint(modifiers) : "Start a session first.")
         .accessibilityLabel(title)
-        .accessibilityHint(key.hint)
     }
 
     private func shortcutLabel(_ title: String, key: ShortcutKey) -> some View {

@@ -32,8 +32,7 @@ private final class OAuthFixture: @unchecked Sendable {
     private var issuedClient = "test-client"
     private var subject = "test-subject"
     private var callbackTask: Task<Void, Error>?
-    let defaults: UserDefaults
-    private let defaultsName: String
+    let defaults = TestDefaults()
 
     init(identityOnly: Bool = false, expiresIn: Int = 3600, refreshExpiresIn: Int = 3600) throws {
         var error: Unmanaged<CFError>?
@@ -47,8 +46,6 @@ private final class OAuthFixture: @unchecked Sendable {
         self.identityOnly = identityOnly
         self.expiresIn = expiresIn
         self.refreshExpiresIn = refreshExpiresIn
-        defaultsName = "skill-issue-oauth-tests.\(UUID().uuidString)"
-        defaults = try #require(UserDefaults(suiteName: defaultsName))
     }
 
     var account: ChatGPTAccount? { lock.withLock { stored?.selected } }
@@ -130,7 +127,6 @@ private final class OAuthFixture: @unchecked Sendable {
     func invalidate(_ value: InvalidIdentity?) { lock.withLock { invalidIdentity = value } }
     func cleanUp() {
         finishIdentityRequest(status: 503)
-        defaults.removePersistentDomain(forName: defaultsName)
     }
 
     func open(_ url: URL) -> Bool {
@@ -1166,10 +1162,12 @@ struct OAuthTests {
         await model.shutdown()
     }
 
-    private func loaded(_ model: Model) async throws {
+    private func loaded(_ model: Model, sourceLocation: SourceLocation = #_sourceLocation)
+        async throws
+    {
         let deadline = ContinuousClock.now + .seconds(3)
         while model.working, ContinuousClock.now < deadline { await Task.yield() }
-        try #require(!model.working)
+        try #require(!model.working, sourceLocation: sourceLocation)
     }
 
 }

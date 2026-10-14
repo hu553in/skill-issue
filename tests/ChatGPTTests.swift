@@ -5,7 +5,7 @@ import Testing
 @testable import SkillIssue
 
 @MainActor private final class CallbackPeerState {
-    var connected = false
+    var state: NWConnection.State = .setup
     var closed = false
 }
 
@@ -324,10 +324,12 @@ struct ChatGPTTests {
                 expires: Date().addingTimeInterval(3600), scopes: ["chatgpt.tokens.use.direct"]))
         let session = MockHTTPProtocol.session(server: TestHTTP())
         defer { session.invalidateAndCancel() }
+        let defaults = TestDefaults()
         let chatGPT = ChatGPT(
             session: session,
-            storage: AccountStorage(load: { ChatGPTAccounts(account: account) }, save: { _ in }))
-        let model = Model(chatGPT: chatGPT, defaults: TestDefaults())
+            storage: AccountStorage(load: { ChatGPTAccounts(account: account) }, save: { _ in }),
+            defaults: defaults)
+        let model = Model(chatGPT: chatGPT, defaults: defaults)
         let deadline = ContinuousClock.now + .seconds(3)
         while model.working, ContinuousClock.now < deadline { await Task.yield() }
         try #require(!model.working)
@@ -618,12 +620,14 @@ struct ChatGPTTests {
         try await chatGPT.prepareSession(model: models[0], effort: "low")
         return chatGPT
     }
-    private func waitUntil(_ condition: () -> Bool) async throws {
+    private func waitUntil(
+        _ condition: () -> Bool, sourceLocation: SourceLocation = #_sourceLocation
+    ) async throws {
         let deadline = ContinuousClock.now + .seconds(3)
         while !condition(), ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(10))
         }
-        try #require(condition())
+        try #require(condition(), sourceLocation: sourceLocation)
     }
 
     @Test func catalogOrderVisibilityAndDefaults() async throws {
@@ -835,6 +839,9 @@ struct ChatGPTTests {
             defaults: defaults)
         try await waitUntil { !model.working }
         #expect(model.recovery == .configuration && model.recoveryTitle == nil)
+        #expect(
+            model.sessionUnavailableReason == "Resolve the error above before starting a session."
+        )
         #expect(model.canAuthenticate && !model.canSelectModel && !model.canSelectEffort)
         #expect(model.catalogError.contains("model catalog request"))
         #expect(model.catalogError.contains("Update Skill Issue or report"))
@@ -916,24 +923,49 @@ struct ChatGPTTests {
         #expect(server.requests.count == 4)
     }
 
+    @Test func cancelledSignInDoesNotOpenBrowser() async throws {
+        let session = MockHTTPProtocol.session(server: TestHTTP())
+        defer { session.invalidateAndCancel() }
+        var opened = false
+        let chatGPT = ChatGPT(
+            session: session, storage: StoredAccount().storage, defaults: TestDefaults(),
+            openAuthorization: { _ in
+                opened = true
+                return false
+            })
+        try await chatGPT.restore()
+        let signIn = Task { try await chatGPT.signIn() }
+        signIn.cancel()
+        do {
+            try await signIn.value
+            Issue.record("Cancelled sign-in completed successfully")
+        } catch is CancellationError {
+        } catch {
+            Issue.record("Cancelled sign-in did not report cancellation: \(error)")
+        }
+        #expect(!opened)
+    }
+
     @Test func callbackStopClosesAcceptedIncompleteRequest() async throws {
         let server = try CallbackServer()
         let redirect = try #require(URL(string: try await server.start()))
         let port = try #require(redirect.port)
+        let parameters = NWParameters.tcp
+        // Implicit source-port allocation can report EADDRINUSE during concurrent loopback tests.
+        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
         let client = NWConnection(
-            host: "127.0.0.1", port: NWEndpoint.Port(rawValue: UInt16(port))!, using: .tcp)
+            host: "127.0.0.1", port: NWEndpoint.Port(rawValue: UInt16(port))!, using: parameters)
         defer {
             client.cancel()
             server.stop()
         }
         let peer = CallbackPeerState()
         client.stateUpdateHandler = { state in
-            Task { @MainActor in
-                if case .ready = state { peer.connected = true }
-            }
+            Task { @MainActor in peer.state = state }
         }
         client.start(queue: .main)
-        try await waitUntil { peer.connected }
+        try await waitUntil { peer.state != .setup && peer.state != .preparing }
+        try #require(peer.state == .ready)
         client.send(content: Data("GET /auth/".utf8), completion: .contentProcessed { _ in })
         // Let the server accept and begin reading this incomplete HTTP request.
         try await Task.sleep(for: .milliseconds(100))

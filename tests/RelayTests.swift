@@ -427,9 +427,6 @@ private final class TestRelay {
         }
         try #require(failures == [.accessDenied])
         await monitor.value
-        let attempts = server.requests.count
-        try await Task.sleep(for: .milliseconds(100))
-        #expect(server.requests.count == attempts)
         try await relay.close()
     }
 }

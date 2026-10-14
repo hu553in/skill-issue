@@ -54,7 +54,19 @@ export class RelaySession {
       await writer.next("ready");
       return session;
     } catch (error) {
-      await session.dispose();
+      try {
+        await session.dispose();
+      } catch (cleanupError) {
+        const message =
+          error !== null && typeof error === "object" && "message" in error
+            ? String(error.message)
+            : String(error);
+        throw new AggregateError(
+          [error, cleanupError],
+          `Room startup failed: ${message}; cleanup also failed`,
+          { cause: cleanupError }
+        );
+      }
       throw error;
     }
   }

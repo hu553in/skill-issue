@@ -150,12 +150,14 @@ final class ChatGPT {
     }
 
     func signIn(requestPlanConsent: Bool = false) async throws {
+        try Task.checkCancellation()
         try requireRestoredAccounts()
         guard !signingOut else { throw AppFailure.failed }
         let expectedAccount = account
         let server = try CallbackServer()
         defer { server.stop() }
         let redirect = try await server.start()
+        try Task.checkCancellation()
         let state = Data.random().base64URLEncodedString()
         let nonce = Data.random().base64URLEncodedString()
         let verifier = Data.random().base64URLEncodedString()

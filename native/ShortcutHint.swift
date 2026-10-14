@@ -27,29 +27,31 @@ enum ShortcutKey {
         case .menuBarIcon: nil
         }
     }
-    var hint: String { "Control + Option + Command + \(name)" }
+    func hint(_ modifiers: ShortcutModifiers) -> String { "\(modifiers.names) + \(name)" }
 }
 
-struct ShortcutModifiers: View {
+struct ShortcutModifierSymbols: View {
+    let modifiers: ShortcutModifiers
+
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 2) {
-            Image(systemName: "control")
-            Image(systemName: "option")
-            Image(systemName: "command")
+            ForEach(ShortcutModifiers.ordered, id: \.name) {
+                if modifiers.contains($0.modifier) { Image(systemName: $0.image) }
+            }
         }
         .imageScale(.small)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Control + Option + Command")
+        .accessibilityLabel(modifiers.names)
     }
 }
 
 struct ShortcutHint: View {
     let key: ShortcutKey
-    var includeModifiers = false
+    var modifiers: ShortcutModifiers?
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 5) {
-            if includeModifiers { ShortcutModifiers() }
+            if let modifiers { ShortcutModifierSymbols(modifiers: modifiers) }
             if let symbol = key.symbol {
                 Image(systemName: symbol)
             } else {

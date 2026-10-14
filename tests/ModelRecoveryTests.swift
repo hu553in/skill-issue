@@ -114,16 +114,34 @@ private final class RecoveryHTTP: URLProtocol, @unchecked Sendable {
 }
 
 @MainActor
+private final class RecoveryShortcuts {
+    var registered: [ShortcutModifiers] = []
+    var unregistered = 0
+    var taken: ShortcutModifiers?
+    var registry: ShortcutRegistry {
+        ShortcutRegistry(
+            register: { [self] modifiers in
+                if modifiers == taken {
+                    throw AppFailure.shortcutUnavailable("\(modifiers.symbols) + Space")
+                }
+                registered.append(modifiers)
+            },
+            unregister: { [self] in unregistered += 1 })
+    }
+}
+
+@MainActor
 struct ModelRecoveryTests {
     private func configuredModel(
         session: URLSession, storage: AccountStorage, defaults: TestDefaults = TestDefaults(),
-        viewerAccessStorage: ViewerAccessStorage = .keychain
+        viewerAccessStorage: ViewerAccessStorage = .keychain,
+        shortcuts: ShortcutRegistry = .disabled
     ) -> Model {
         return Model(
             chatGPT: ChatGPT(
                 session: session, storage: storage, defaults: defaults,
                 openAuthorization: { _ in false }),
-            defaults: defaults, viewerAccessStorage: viewerAccessStorage)
+            defaults: defaults, viewerAccessStorage: viewerAccessStorage, shortcuts: shortcuts)
     }
     private func session(code: String = "subscription_sharing_usage_unavailable") -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
@@ -137,10 +155,12 @@ struct ModelRecoveryTests {
             expires: expired ? .distantPast : Date().addingTimeInterval(3600),
             scopes: plan ? ["chatgpt.tokens.use.direct"] : ["openid", "profile", "email"])
     }
-    private func loaded(_ model: Model) async throws {
+    private func loaded(_ model: Model, sourceLocation: SourceLocation = #_sourceLocation)
+        async throws
+    {
         let deadline = ContinuousClock.now + .seconds(3)
         while model.working, ContinuousClock.now < deadline { await Task.yield() }
-        try #require(!model.working)
+        try #require(!model.working, sourceLocation: sourceLocation)
     }
 
     @Test func failedAccountReadBlocksSignInUntilExplicitRestore() async throws {
@@ -160,6 +180,7 @@ struct ModelRecoveryTests {
         try await loaded(model)
         #expect(!model.canAuthenticate && !model.canChooseAccount)
         #expect(model.recovery == .restore && model.canRecover)
+        #expect(model.sessionUnavailableReason == "Restore saved accounts first.")
         #expect(model.modelPlaceholder == "Unavailable")
         model.authenticate()
         model.selectAccount("first")
@@ -205,6 +226,7 @@ struct ModelRecoveryTests {
         #expect(model.error.isEmpty && model.catalogError.isEmpty)
         #expect(stored.current?.clientID == "test-client")
         #expect(model.status == "Signed out")
+        #expect(model.sessionUnavailableReason == "Sign in with ChatGPT first.")
         model.authenticate()
         #expect(model.working && model.status == "Signing in…" && !model.canStartSession)
         try await loaded(model)
@@ -479,6 +501,7 @@ struct ModelRecoveryTests {
         #expect(!model.viewerAccessEnabled && !model.viewerSetupRequired)
         #expect(model.viewerSetupIssue == nil && model.viewerSetupWarning == nil)
         #expect(model.canStartSession && model.status == "Ready")
+        #expect(model.sessionUnavailableReason == nil && model.lockReason == nil)
         #expect(store.loadedOrigins.isEmpty && store.savedCredentials.isEmpty)
         model.configureViewerAccess()
         #expect(!model.configuringViewerAccess && store.loadedOrigins.isEmpty)
@@ -490,6 +513,7 @@ struct ModelRecoveryTests {
             model.viewerSetupIssue == .setupRequired && model.viewerSetupWarning == .setupRequired)
         #expect(model.error.isEmpty && model.catalogError.isEmpty && model.feedback == nil)
         #expect(!model.canStartSession && model.viewerCredentials == nil)
+        #expect(model.sessionUnavailableReason == "Configure Cloudflare Access first.")
         model.startSession()
         #expect(!model.working && !model.state.live)
         model.setViewerAccessEnabled(false)
@@ -500,6 +524,56 @@ struct ModelRecoveryTests {
         #expect(model.recoveryTitle == "Retry" && model.canRecover)
         #expect(model.canStartSession && !model.state.live)
         await model.shutdown()
+    }
+
+    @Test func shortcutModifiersSaveAtomicallyAndReachTheViewer() async throws {
+        let shortcuts = RecoveryShortcuts()
+        let defaults = TestDefaults()
+        defaults.set(ShortcutModifiers.command.rawValue, forKey: "shortcutModifiers")
+        let http = session(code: "models")
+        defer { http.invalidateAndCancel() }
+        let accountStore = RecoveryAccountStore(session: tokens())
+        let model = configuredModel(
+            session: http, storage: accountStore.storage, defaults: defaults,
+            shortcuts: shortcuts.registry)
+        try await loaded(model)
+        #expect(model.shortcutModifiers == .standard && model.state.modifiers == "⌃⌥⌘")
+        shortcuts.taken = .standard
+        model.registerShortcuts()
+        #expect(
+            model.shortcutError
+                == "⌃⌥⌘ + Space is already used by another app. Choose other modifier keys."
+        )
+        model.retryModels()
+        try await loaded(model)
+        #expect(!model.shortcutError.isEmpty && model.catalogError.isEmpty)
+        shortcuts.taken = nil
+        model.registerShortcuts()
+        #expect(model.shortcutError.isEmpty && shortcuts.registered == [.standard])
+        model.configureShortcuts()
+        #expect(model.configuringShortcuts && shortcuts.unregistered == 0)
+        #expect(throws: AppFailure.self) { try model.saveShortcutModifiers(.command) }
+        shortcuts.taken = [.control, .option]
+        #expect(throws: AppFailure.self) { try model.saveShortcutModifiers([.control, .option]) }
+        #expect(model.configuringShortcuts && model.shortcutModifiers == .standard)
+        #expect(defaults.integer(forKey: "shortcutModifiers") == ShortcutModifiers.command.rawValue)
+        try model.saveShortcutModifiers([.control, .shift])
+        #expect(!model.configuringShortcuts && model.shortcutModifiers == [.control, .shift])
+        #expect(model.state.modifiers == "⌃⇧" && shortcuts.registered.last == [.control, .shift])
+        model.state.live = true
+        #expect(model.lockReason == "Stop the session first." && !model.canConfigureShortcuts)
+        model.configureShortcuts()
+        #expect(!model.configuringShortcuts && shortcuts.unregistered == 0)
+        #expect(throws: AppFailure.self) { try model.saveShortcutModifiers(.standard) }
+        model.state.live = false
+        await model.shutdown()
+        #expect(shortcuts.unregistered == 1)
+        let restored = configuredModel(
+            session: http, storage: accountStore.storage, defaults: defaults)
+        try await loaded(restored)
+        #expect(restored.shortcutModifiers == [.control, .shift])
+        #expect(restored.state.modifiers == "⌃⇧")
+        await restored.shutdown()
     }
 
     @Test func accessSaveIsAtomicAndDisablingRetainsPerOriginCredentials() async throws {
