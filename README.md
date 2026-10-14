@@ -16,11 +16,18 @@ to use under interview stress**.
 
 Requires Apple Silicon and macOS 26+. For a source build, see [Development](#development).
 
-1. Sign in to GitHub and open a successful main-branch run in
-   [Actions](https://github.com/hu553in/skill-issue/actions/workflows/ci.yml?query=branch%3Amain).
-2. Download `Skill-Issue-macos-arm64.zip` from **Artifacts**, extract it, and move `Skill Issue.app`
-   to Applications. Artifacts expire according to the repository's retention settings.
-3. Open the app. It lives in the menu bar; click its icon to open or close Settings.
+Install with [Homebrew](https://brew.sh). If switching from a manual installation, quit the app and
+remove its old copy from Applications first:
+
+```sh
+brew install --cask hu553in/tap/skill-issue
+```
+
+Alternatively, download `Skill-Issue-macos-arm64.zip` from
+[Releases](https://github.com/hu553in/skill-issue/releases), extract it, and move `Skill Issue.app`
+to Applications.
+
+Open the app. It lives in the menu bar; click its icon to open or close Settings.
 
 The app is ad hoc signed without an Apple developer certificate and is not notarized. If macOS
 blocks it, use **System Settings > Privacy & Security > Open Anyway** after attempting to open it;
@@ -39,10 +46,34 @@ This removes only the quarantine attribute and preserves other extended attribut
 
 </details>
 
+### Update and uninstall
+
+Stop the session and quit the app before updating or uninstalling. When updating, deploy the
+[Worker](#viewer-endpoint) from the same release tag before starting a new session.
+
+To update:
+
+```sh
+brew update
+brew upgrade --cask hu553in/tap/skill-issue
+```
+
+For a manual installation, replace the app with the ZIP from the new release.
+
+To uninstall:
+
+```sh
+brew uninstall --cask hu553in/tap/skill-issue
+```
+
 ## Viewer endpoint
 
 **Deploy the viewer and relay to your own Cloudflare account.** Its limits and billing apply. The
 server needs no ChatGPT credentials, tunnels or open ports on your Mac.
+
+For a released app, [deploy from a checkout](#deploy-from-a-checkout) using the same release tag.
+Disable automatic Cloudflare builds from `main` so later pushes cannot replace that Worker with a
+newer version. The button below deploys `main`; use it with an app built from the same commit.
 
 Cloudflare Access is optional. Without it, anyone can create rooms and use your deployment's
 resources, subject to IP rate limits. Sessions remain encrypted. Follow
@@ -77,16 +108,14 @@ branches** off. Production-branch pushes still deploy automatically.
 
 ### Deploy from a checkout
 
-With [Bun](https://bun.sh) installed at the version declared in `package.json`, run:
+Use a checkout matching your installed app. For a released app, check out its release tag first.
+With [Bun](https://bun.sh) at the version declared in that checkout's `package.json`, run:
 
 ```sh
-bun install --frozen-lockfile
+bun ci
 bunx wrangler login
 bun deploy
 ```
-
-Update the app and Worker together; mixed old and new versions are not supported. Start a new
-session after updating both.
 
 ### Cloudflare Access
 
@@ -125,8 +154,7 @@ In **Destinations > Public hostnames**, select **Switch to custom input** and en
 hostname, for example `skill-issue.example.workers.dev`. **Do not include `https://` or a path.**
 Under **Details**, set **Name** to `Skill Issue`. A custom domain is optional.
 
-**Use Public hostnames, not Add Workers or Worker Access.** Worker-level protection currently
-[blocks the viewer's WebSocket connections](https://developers.cloudflare.com/workers/configuration/cloudflare-access/).
+**Use Public hostnames, not Add Workers or Worker Access.**
 
 In **Access policies**, use **Create new policy** twice:
 
@@ -345,7 +373,7 @@ Use full Xcode with a Swift toolchain satisfying [Package.swift](Package.swift),
 
 ```sh
 xcodebuild -downloadComponent metalToolchain
-bun install --frozen-lockfile
+bun ci
 bun setup:swift
 ```
 
@@ -381,6 +409,27 @@ Outputs:
 
 For a debug bundle, run `bun build:swift`; the output is `dist/debug/Skill Issue.app`. Both commands
 include dependency license notices and do not launch the app.
+
+### Releases
+
+```sh
+bun release:patch
+bun release:minor
+bun release:major
+```
+
+Release It! runs the full check, updates `package.json`, creates the conventional release commit and
+annotated `vX.Y.Z` tag, and pushes both. Run from a clean `main` checkout tracking `origin/main`,
+with Node.js satisfying
+[Release It!'s requirements](https://github.com/release-it/release-it/blob/main/package.json).
+
+CI publishes a GitHub release with generated notes and the checked ZIP after the web, Swift and
+sanitizer checks pass. Published release tags and assets are immutable; fixes need a new version.
+The app's version and build number come from `package.json`; packaging rejects a mismatched release
+tag. The same tag identifies the matching Worker source.
+
+After publication, update `version` and `sha256` in `Casks/skill-issue.rb` in `hu553in/homebrew-tap`
+using the published ZIP, then commit and push the cask change.
 
 ### Checks
 
@@ -441,9 +490,6 @@ Both commands rebuild and relaunch the debug app:
 Rebuilding an ad hoc signed app can require Keychain and screen approval again. If screen access
 remains denied, remove its old entry in **System Settings > Privacy & Security > Screen & System
 Audio Recording**, add the current app bundle, then quit and reopen.
-
-If a build cannot find Metal after a reboot, run `swift package clean` and retry; see the
-[upstream cache issue](https://github.com/swiftlang/swift-build/issues/1798).
 
 ## License
 

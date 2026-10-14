@@ -8,7 +8,11 @@ export default defineConfig({
     ...(ultracite.overrides ?? []),
     {
       files: ["**/*.md", "**/*.yml", "**/*.yaml"],
-      options: { printWidth: 100, proseWrap: "always", singleQuote: true },
+      options: {
+        printWidth: 100,
+        proseWrap: "always",
+        singleQuote: true,
+      },
     },
   ],
 });

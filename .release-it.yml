@@ -1,0 +1,11 @@
+hooks:
+  before:init: bun check
+
+git:
+  requireBranch: main
+  tagName: 'v${version}'
+  tagAnnotation: 'v${version}'
+  commitMessage: 'chore(release): v${version}'
+
+npm:
+  publish: false

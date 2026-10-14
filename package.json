@@ -1,5 +1,6 @@
 {
   "name": "skill-issue",
+  "version": "0.1.0",
   "private": true,
   "description": "macOS interview assistant with local speech recognition and an encrypted web viewer.",
   "author": "Ruslan Khasanshin",
@@ -12,7 +13,7 @@
     "build:web": "vite build web --outDir dist && bun scripts/notices.ts web web/dist/notices",
     "build:swift": "bash scripts/package.sh debug",
     "build:release": "bash scripts/package.sh release",
-    "run:swift": "bash scripts/build_and_run.sh",
+    "run:swift": "bash scripts/build-and-run.sh",
     "lint:web": "bun types:worker && ultracite check && bash scripts/format-config.sh check && stylelint --max-warnings 0 --ignore-path .gitignore 'web/**/*.css' && shfmt -d scripts/*.sh && bunx shellcheck scripts/*.sh",
     "lint:swift": "swift format lint --strict --recursive Package.swift native tests checks/native_relay.swift scripts/quit.swift && swiftlint lint --strict --quiet && swiftc -typecheck -swift-version 6 -warnings-as-errors scripts/quit.swift",
     "lint": "bun lint:web && bun lint:swift && bun check:plist",
@@ -26,10 +27,10 @@
     "check:types": "bun types:worker && tsc --pretty && tsc --pretty -p web/tsconfig.json && tsc --pretty -p relay/tsconfig.json",
     "types:worker": "wrangler types worker-configuration.d.ts",
     "check:unused:web": "knip",
-    "check:unused:swift": "bash scripts/quality-swift.sh analyze",
     "check:vulns": "bun audit --prod --audit-level=high",
-    "check:plist": "plutil -lint scripts/Info.plist && plutil -convert xml1 -o - scripts/Info.plist | diff scripts/Info.plist -",
     "check:integration:web": "bun playwright:install && playwright test --project=web && playwright test --project=relay",
+    "check:plist": "plutil -lint scripts/Info.plist && plutil -convert xml1 -o - scripts/Info.plist | diff scripts/Info.plist -",
+    "check:unused:swift": "bash scripts/quality-swift.sh analyze",
     "check:integration:swift": "playwright test --project=native",
     "test:web": "bun test checks/*.test.ts",
     "test:coverage:web": "bun test --coverage --coverage-reporter=text --coverage-reporter=lcov checks/*.test.ts",
@@ -43,6 +44,9 @@
     "check:fix": "bun lint:fix && bun check",
     "playwright:install": "playwright install --only-shell chromium",
     "deploy": "bun build:web && wrangler deploy",
+    "release:patch": "release-it patch",
+    "release:minor": "release-it minor",
+    "release:major": "release-it major",
     "prepare": "if [ -n \"${CI:-}\" ] || [ \"${LEFTHOOK:-}\" = \"0\" ]; then exit 0; fi; lefthook install"
   },
   "dependencies": {
@@ -65,6 +69,7 @@
     "oxfmt": "^0.73.0",
     "oxlint": "^1.87.0",
     "oxlint-tsgolint": "^7.0.2004",
+    "release-it": "^21.1.1",
     "stylelint": "^17.16.0",
     "stylelint-config-standard": "^40.0.0",
     "typescript": "^7.0.2",
@@ -72,6 +77,9 @@
     "vite": "^8.3.4",
     "wrangler": "^4.149.0",
     "ws": "^8.22.0"
+  },
+  "overrides": {
+    "basic-ftp": "^6.2.3"
   },
   "packageManager": "bun@1.4.3"
 }

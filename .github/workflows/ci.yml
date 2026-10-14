@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+    tags:
+      - 'v*.*.*'
   pull_request:
   workflow_dispatch:
 
@@ -37,9 +39,9 @@ jobs:
           restore-keys: |
             playwright|${{ runner.os }}|
       - run: bun playwright install-deps chromium
-      - run: bun check:web
-        env:
+      - env:
           GITHUB_TOKEN: ${{ github.token }}
+        run: bun check:web
       - if: always()
         uses: actions/upload-artifact@v7
         with:
@@ -86,9 +88,9 @@ jobs:
       - run: xcodebuild -downloadComponent metalToolchain
       - if: matrix.command == 'check:swift'
         run: brew install swiftlint
-      - run: bun "${CHECK_COMMAND}"
-        env:
+      - env:
           CHECK_COMMAND: ${{ matrix.command }}
+        run: bun "${CHECK_COMMAND}"
       - if: matrix.command == 'check:swift'
         uses: actions/upload-artifact@v7
         with:
@@ -107,3 +109,21 @@ jobs:
           name: playwright-test-results-native-${{ github.run_attempt }}
           path: test-results
           if-no-files-found: ignore
+
+  release:
+    needs: [web, swift]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: Skill-Issue-macos-arm64.zip
+          path: dist
+          skip-decompress: true
+      - uses: softprops/action-gh-release@v3
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: dist/Skill-Issue-macos-arm64.zip

@@ -11,6 +11,16 @@ case "$#:$CONFIGURATION" in
 	;;
 esac
 
+VERSION="$(bun -p 'require("./package.json").version')"
+if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+	printf 'Invalid package.json version %s; expected MAJOR.MINOR.PATCH.\n' "$VERSION" >&2
+	exit 1
+fi
+if [[ "${GITHUB_REF_TYPE:-}" == tag && "${GITHUB_REF_NAME:-}" != "v$VERSION" ]]; then
+	printf 'Release tag %s must match package.json version v%s.\n' "${GITHUB_REF_NAME:-}" "$VERSION" >&2
+	exit 1
+fi
+
 swift build --configuration "$CONFIGURATION" --jobs 4 --force-resolved-versions
 BIN_PATH="$(swift build --configuration "$CONFIGURATION" --show-bin-path)"
 APP_BUNDLE="$TASK_ROOT/dist/$CONFIGURATION/Skill Issue.app"
@@ -24,6 +34,8 @@ for RESOURCE_BUNDLE in "$BIN_PATH"/*.bundle; do
 	ditto "$RESOURCE_BUNDLE" "$STAGED_APP/Contents/Resources/$(basename "$RESOURCE_BUNDLE")"
 done
 cp "$TASK_ROOT/scripts/Info.plist" "$STAGED_APP/Contents/Info.plist"
+plutil -insert CFBundleShortVersionString -string "$VERSION" "$STAGED_APP/Contents/Info.plist"
+plutil -insert CFBundleVersion -string "$VERSION" "$STAGED_APP/Contents/Info.plist"
 plutil -lint "$STAGED_APP/Contents/Info.plist"
 RESOURCE_PATH="$STAGED_APP/Contents/Resources/SkillIssue_SkillIssue.bundle/Contents/Resources/Resources"
 bun -e 'for (const path of process.argv.slice(1)) JSON.parse(await Bun.file(path).text())' \

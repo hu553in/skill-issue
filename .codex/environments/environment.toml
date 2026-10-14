@@ -6,4 +6,4 @@ script = ""
 [[actions]]
 name = "Run"
 icon = "run"
-command = "./scripts/build_and_run.sh"
+command = "./scripts/build-and-run.sh"
