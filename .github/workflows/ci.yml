@@ -127,3 +127,25 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: dist/Skill-Issue-macos-arm64.zip
+
+  homebrew:
+    name: Homebrew
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: macos-26
+    permissions:
+      contents: read
+    steps:
+      - uses: Homebrew/actions/setup-homebrew@2026.10.12.1
+      - id: git_setup
+        uses: Homebrew/actions/git-user-config@2026.10.12.1
+      - name: Bump Homebrew cask
+        env:
+          HOMEBREW_GITHUB_API_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          HOMEBREW_GIT_COMMITTER_NAME: ${{ steps.git_setup.outputs.name }}
+          HOMEBREW_GIT_COMMITTER_EMAIL: ${{ steps.git_setup.outputs.email }}
+        run: |
+          : "${HOMEBREW_GITHUB_API_TOKEN:?Set the HOMEBREW_TAP_TOKEN repository secret}"
+          brew tap hu553in/tap
+          brew trust --cask hu553in/tap/skill-issue
+          brew bump --no-fork --open-pr --cask hu553in/tap/skill-issue

@@ -428,8 +428,13 @@ sanitizer checks pass. Published release tags and assets are immutable; fixes ne
 The app's version and build number come from `package.json`; packaging rejects a mismatched release
 tag. The same tag identifies the matching Worker source.
 
-After publication, update `version` and `sha256` in `Casks/skill-issue.rb` in `hu553in/homebrew-tap`
-using the published ZIP, then commit and push the cask change.
+After publication, CI uses `brew bump` to open a cask update PR in
+[`hu553in/homebrew-tap`](https://github.com/hu553in/homebrew-tap). Review and merge it to make the
+release available through Homebrew. The tap also checks for updates daily.
+
+Set the `HOMEBREW_TAP_TOKEN` Actions secret in this repository to a fine-grained personal access
+token restricted to `hu553in/homebrew-tap`, with **Contents: Read and write** and **Pull requests:
+Read and write**.
 
 ### Checks
 
