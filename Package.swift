@@ -6,7 +6,7 @@ let package = Package(
     platforms: [.macOS("26.0")],
     dependencies: [
         .package(url: "https://github.com/airsidemobile/JOSESwift.git", exact: "3.0.0"),
-        .package(url: "https://github.com/apple/swift-openapi-runtime", exact: "1.13.0"),
+        .package(url: "https://github.com/apple/swift-openapi-runtime", exact: "1.13.1"),
         .package(url: "https://github.com/auth0/SimpleKeychain", exact: "1.3.0"),
         .package(
             url: "https://github.com/soniqo/speech-swift.git",
