@@ -1,6 +1,6 @@
 {
   "name": "skill-issue",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "macOS interview assistant with local speech recognition and an encrypted web viewer.",
   "author": "Ruslan Khasanshin",
