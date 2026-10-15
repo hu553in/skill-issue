@@ -484,7 +484,7 @@ final class ChatGPT {
             #endif
             guard let http = response as? HTTPURLResponse else { throw AppFailure.failed }
             guard http.statusCode == 200 else {
-                throw try await responseFailure(bytes: bytes, response: http)
+                throw try await ChatGPTFailure(bytes: bytes, response: http)
             }
 
             var completed = false
@@ -520,27 +520,6 @@ final class ChatGPT {
         }
     }
 
-    private func responseFailure(
-        bytes: URLSession.AsyncBytes, response: HTTPURLResponse
-    ) async throws -> ChatGPTFailure {
-        var body = Data()
-        do {
-            for try await byte in bytes {
-                try Task.checkCancellation()
-                body.append(byte)
-                if body.count >= 64_000 { break }
-            }
-        } catch {
-            try Task.checkCancellation()
-            if error is CancellationError { throw error }
-            // Headers and any received error payload remain authoritative
-            // even when the transport drops before the body reaches EOF.
-        }
-        return ChatGPTFailure(
-            status: response.statusCode, body: body,
-            requestID: response.value(forHTTPHeaderField: "x-request-id"))
-    }
-
     private func json(_ request: URLRequest) async throws -> [String: Any] {
         let bytes: URLSession.AsyncBytes
         let response: URLResponse
@@ -556,7 +535,7 @@ final class ChatGPT {
         #endif
         guard let http = response as? HTTPURLResponse else { throw AppFailure.failed }
         guard (200..<300).contains(http.statusCode) else {
-            throw try await responseFailure(bytes: bytes, response: http)
+            throw try await ChatGPTFailure(bytes: bytes, response: http)
         }
         var data = Data()
         do {

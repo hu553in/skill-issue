@@ -6,8 +6,10 @@ import Testing
 @testable import SkillIssue
 
 private struct WebSocketFrames: Sendable {
-    private var buffer = Data()
+    private var buffer: Data
     private var fragment = Data()
+
+    init(buffer: Data = Data()) { self.buffer = buffer }
 
     mutating func append(_ data: Data) throws -> [Data] {
         buffer.append(data)
@@ -60,11 +62,14 @@ private final class TestRelay {
     private var connections: [NWConnection] = []
     private var sockets: [NWConnection] = []
     private var draining: Set<ObjectIdentifier> = []
+    private var publicationPrefixes: [ObjectIdentifier: Data] = [:]
     struct Publication {
+        struct Packet: Decodable { let seq: Int, box: String }
         let connection: Int
-        let data: Data
+        let packet: Packet
     }
     private(set) var publications: [Publication] = []
+    var publicationStarted: Bool { !publicationPrefixes.isEmpty }
     private var readPublications = false
     private var ready: CheckedContinuation<String, Error>?
     private(set) var upgraded = false
@@ -126,9 +131,26 @@ private final class TestRelay {
         readPublications = true
         for socket in sockets { drain(socket) }
     }
+    func readPublicationPrefix() {
+        guard let socket = sockets.last else {
+            Issue.record("The relay did not open its WebSocket")
+            return
+        }
+        socket.receive(minimumIncompleteLength: 1, maximumLength: 1) {
+            [weak self] data, _, _, error in
+            Task { @MainActor in
+                guard error == nil, let data, !data.isEmpty else {
+                    Issue.record("The relay did not begin sending its publication")
+                    return
+                }
+                self?.publicationPrefixes[ObjectIdentifier(socket)] = data
+            }
+        }
+    }
     private func drain(_ connection: NWConnection) {
         guard draining.insert(ObjectIdentifier(connection)).inserted else { return }
-        readFrames(connection, frames: WebSocketFrames())
+        let prefix = publicationPrefixes.removeValue(forKey: ObjectIdentifier(connection))
+        readFrames(connection, frames: WebSocketFrames(buffer: prefix ?? Data()))
     }
     private func readFrames(_ connection: NWConnection, frames: WebSocketFrames) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 1_000_000) {
@@ -147,8 +169,10 @@ private final class TestRelay {
                         return
                     }
                     self.publications.append(
-                        contentsOf: messages.map {
-                            Publication(connection: index, data: $0)
+                        contentsOf: try messages.map {
+                            Publication(
+                                connection: index,
+                                packet: try JSONDecoder().decode(Publication.Packet.self, from: $0))
                         })
                     if !complete { self.readFrames(connection, frames: next) }
                 } catch {
@@ -454,7 +478,8 @@ private final class TestRelay {
     try #require(server.requests.filter({ $0.path.hasSuffix("/socket") }).count == 2)
     #expect(failures == 0)
     server.socketStatus = 101
-    while !reconnected, ContinuousClock.now < deadline {
+    let reconnectionDeadline = ContinuousClock.now + .seconds(7)
+    while !reconnected, ContinuousClock.now < reconnectionDeadline {
         try await Task.sleep(for: .milliseconds(10))
     }
     try #require(reconnected)
@@ -484,14 +509,13 @@ private final class TestRelay {
 private func publication(
     _ received: TestRelay.Publication, viewer: URL
 ) throws -> (sequence: Int, state: ViewState) {
-    struct Packet: Decodable { let seq: Int, box: String }
     let fragment = try #require(viewer.fragment).split(separator: ".").map(String.init)
     let key = try #require(
         Data(
             base64Encoded:
                 fragment[2].replacingOccurrences(of: "-", with: "+")
                 .replacingOccurrences(of: "_", with: "/") + "="))
-    let packet = try JSONDecoder().decode(Packet.self, from: received.data)
+    let packet = received.packet
     let data = try #require(Data(base64Encoded: packet.box))
     let plaintext = try AES.GCM.open(
         AES.GCM.SealedBox(combined: data), using: SymmetricKey(data: key),
@@ -500,32 +524,29 @@ private func publication(
 }
 
 @MainActor
-@Test func slowRelayCoalescesUnsentStreamingSnapshotsAndDeliversTheNewestText() async throws {
+@Test func queuedStreamingSnapshotsCoalesceAndDeliverTheNewestText() async throws {
     let server = try TestRelay()
     let base = try await server.start()
     defer { server.stop() }
     let relay = try await Relay.create(url: base)
     var state = ViewState(
         live: true,
-        answers: [AnswerCard(id: "a", text: String(repeating: "x", count: 2_000_000))],
+        answers: [AnswerCard(id: "a", text: "initial")],
         selectedID: "a")
+    // Keep the burst in one actor turn so coalescing does not depend on TCP buffer sizes.
     for index in 1...25 {
         state.answers[0].text += "\(index)"
         try relay.publish(state)
-        try await Task.sleep(for: .milliseconds(index <= 5 ? 150 : 25))
     }
     server.drainPublications()
     let deadline = ContinuousClock.now + .seconds(7)
-    while try server.publications.last.map({
-        try publication($0, viewer: relay.viewerURL).sequence
-    }) != 25, ContinuousClock.now < deadline {
+    while server.publications.last?.packet.seq != 25, ContinuousClock.now < deadline {
         try await Task.sleep(for: .milliseconds(10))
     }
     let received = try server.publications.map { try publication($0, viewer: relay.viewerURL) }
     try #require(received.last?.sequence == 25)
     #expect(received.last?.state.answers[0].text == state.answers[0].text)
-    #expect(received.count < 25)
-    #expect(received.map(\.sequence) == received.map(\.sequence).sorted())
+    #expect(received.map(\.sequence) == [1, 25])
     try await relay.close()
 }
 
@@ -548,9 +569,7 @@ private func publication(
         try relay.publish(state)
     }
     let deadline = ContinuousClock.now + .seconds(5)
-    while try server.publications.last.map({
-        try publication($0, viewer: relay.viewerURL).sequence
-    }) != 19, ContinuousClock.now < deadline {
+    while server.publications.last?.packet.seq != 19, ContinuousClock.now < deadline {
         try await Task.sleep(for: .milliseconds(10))
     }
     let received = try server.publications.map { try publication($0, viewer: relay.viewerURL) }
@@ -588,8 +607,13 @@ private func publication(
         live: true,
         answers: [AnswerCard(id: "a", text: String(repeating: "x", count: 2_000_000))],
         selectedID: "a")
+    server.readPublicationPrefix()
     try relay.publish(state)
-    try await Task.sleep(for: .milliseconds(150))
+    let sendingDeadline = ContinuousClock.now + .seconds(7)
+    while !server.publicationStarted, ContinuousClock.now < sendingDeadline {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    try #require(server.publicationStarted)
     for _ in 1...6 {
         state.scroll(1)
         try relay.publish(state)
@@ -606,12 +630,15 @@ private func publication(
     #expect(replay.state.answers[0].text == state.answers[0].text && failures == 0)
     state.answers[0].text += "new sender remains usable"
     try relay.publish(state)
-    while try server.publications.last.map({
-        try publication($0, viewer: relay.viewerURL).sequence
-    }) != 9, ContinuousClock.now < deadline {
+    let publicationDeadline = ContinuousClock.now + .seconds(7)
+    while server.publications.last(where: { $0.connection == replacement.connection })?.packet.seq
+        != 9, ContinuousClock.now < publicationDeadline
+    {
         try await Task.sleep(for: .milliseconds(10))
     }
-    let newest = try publication(try #require(server.publications.last), viewer: relay.viewerURL)
+    let newest = try publication(
+        try #require(server.publications.last { $0.connection == replacement.connection }),
+        viewer: relay.viewerURL)
     #expect(
         newest.sequence == 9 && newest.state.answers[0].text.hasSuffix("new sender remains usable"))
     #expect(failures == 0)

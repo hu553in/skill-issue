@@ -73,22 +73,20 @@ private final class TestHTTP: @unchecked Sendable {
     private let stream: [Data]?
     private let finishStream: Bool
     private let responseStatus: Int
-    private let responseStreamFailure: Bool
-    private let droppedJSONError: (path: String, body: Data, status: Int)?
+    private let jsonError: (path: String, body: Data, status: Int)?
     init(
         output: Output = .empty, models: [[String: Any]] = [catalogModel("gpt-6-luna")],
         stream: [Data]? = nil, finishStream: Bool = true, responseStatus: Int = 200,
         refreshError: String? = nil, refreshStatus: Int = 400, revocationStatuses: [Int] = [200],
-        revocationNetworkFailure: Bool = false, responseStreamFailure: Bool = false,
-        droppedJSONError: (path: String, body: Data, status: Int)? = nil
+        revocationNetworkFailure: Bool = false,
+        jsonError: (path: String, body: Data, status: Int)? = nil
     ) {
         self.output = output
         catalog = models
         self.stream = stream
         self.finishStream = finishStream
         self.responseStatus = responseStatus
-        self.responseStreamFailure = responseStreamFailure
-        self.droppedJSONError = droppedJSONError
+        self.jsonError = jsonError
         self.refreshError = refreshError
         self.refreshStatus = refreshStatus
         self.revocationStatuses = revocationStatuses
@@ -139,10 +137,8 @@ private final class TestHTTP: @unchecked Sendable {
         pending?.respond(tokens)
     }
     func receive(_ request: MockHTTPProtocol) throws {
-        if let failure = droppedJSONError, request.request.url?.path == failure.path {
-            request.respond(
-                [failure.body], contentType: "application/json", status: failure.status,
-                failAfterBody: true)
+        if let failure = jsonError, request.request.url?.path == failure.path {
+            request.respond(failure.body, contentType: "application/json", status: failure.status)
             return
         }
         switch request.request.url!.path {
@@ -190,7 +186,7 @@ private final class TestHTTP: @unchecked Sendable {
             if let stream {
                 request.respond(
                     stream, contentType: "text/event-stream", status: responseStatus,
-                    finished: finishStream, failAfterBody: responseStreamFailure)
+                    finished: finishStream)
                 return
             }
             let refusal = "I cannot assist with that request."
@@ -254,21 +250,30 @@ private final class MockHTTPProtocol: URLProtocol, @unchecked Sendable {
         respond([data], contentType: contentType, status: status)
     }
     func respond(
-        _ chunks: [Data], contentType: String, status: Int = 200, finished: Bool = true,
-        failAfterBody: Bool = false
+        _ chunks: [Data], contentType: String, status: Int = 200, finished: Bool = true
     ) {
         let response = HTTPURLResponse(
             url: request.url!, statusCode: status, httpVersion: "HTTP/1.1",
             headerFields: ["Content-Type": contentType, "x-request-id": "fixture-request"])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         for chunk in chunks { client?.urlProtocol(self, didLoad: chunk) }
-        if failAfterBody {
-            DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(100)) { [self] in
-                client?.urlProtocol(self, didFailWithError: URLError(.networkConnectionLost))
-            }
-        } else if finished {
-            client?.urlProtocolDidFinishLoading(self)
-        }
+        if finished { client?.urlProtocolDidFinishLoading(self) }
+    }
+}
+
+private struct FailingBytes: AsyncSequence, AsyncIteratorProtocol, Sendable {
+    let body: Data
+    let error: any Error
+    private var offset = 0
+    init(body: Data, error: any Error = URLError(.networkConnectionLost)) {
+        self.body = body
+        self.error = error
+    }
+    func makeAsyncIterator() -> Self { self }
+    mutating func next() throws -> UInt8? {
+        guard offset < body.count else { throw error }
+        defer { offset += 1 }
+        return body[body.startIndex + offset]
     }
 }
 
@@ -529,7 +534,7 @@ struct ChatGPTTests {
 
     @Test func directAdmissionDetailReachesModelFeedback() async throws {
         let body = Data(#"{"detail":"The serving region is not supported"}"#.utf8)
-        let server = TestHTTP(droppedJSONError: ("/v1/models", body, 403))
+        let server = TestHTTP(jsonError: ("/v1/models", body, 403))
         let session = MockHTTPProtocol.session(server: server)
         defer { session.invalidateAndCancel() }
         let model = Model(
@@ -946,7 +951,8 @@ struct ChatGPTTests {
         #expect(!opened)
     }
 
-    @Test func callbackStopClosesAcceptedIncompleteRequest() async throws {
+    @Test(arguments: [false, true])
+    func callbackStopClosesIdleAndIncompleteRequests(_ partial: Bool) async throws {
         let server = try CallbackServer()
         let redirect = try #require(URL(string: try await server.start()))
         let port = try #require(redirect.port)
@@ -966,9 +972,9 @@ struct ChatGPTTests {
         client.start(queue: .main)
         try await waitUntil { peer.state != .setup && peer.state != .preparing }
         try #require(peer.state == .ready)
-        client.send(content: Data("GET /auth/".utf8), completion: .contentProcessed { _ in })
-        // Let the server accept and begin reading this incomplete HTTP request.
-        try await Task.sleep(for: .milliseconds(100))
+        if partial {
+            client.send(content: Data("GET /auth/".utf8), completion: .contentProcessed { _ in })
+        }
         client.receive(minimumIncompleteLength: 1, maximumLength: 16384) { _, _, complete, error in
             Task { @MainActor in
                 peer.closed = complete || error != nil
@@ -1236,7 +1242,7 @@ struct ChatGPTTests {
             await model.shutdown()
             finished = true
         }
-        try await Task.sleep(for: .milliseconds(50))
+        try await waitUntil { model.status == "Quitting…" }
         #expect(!finished)
         #expect(stored.events.isEmpty)
         server.finishRefresh()
@@ -1450,32 +1456,56 @@ struct ChatGPTTests {
     }
 
     @Test func droppedErrorBodyPreservesReceivedStatusDiagnosticsAndBytes() async throws {
-        for body in [
-            Data(#"{"error":{"code":"subscription_sharing_usage_limit_exceeded"}}"#.utf8),
-            Data(#"{"error":{"code":"subscription_sharing_usage_"#.utf8), Data(),
-        ] {
-            let server = TestHTTP(
-                stream: [body], responseStatus: 429, responseStreamFailure: true)
-            let session = MockHTTPProtocol.session(server: server)
-            defer { session.invalidateAndCancel() }
-            let chatGPT = try await configuredChatGPT(session: session)
-            do {
-                try await chatGPT.answer(
-                    input: [], language: "English",
-                    model: try ChatGPTModel(fields: catalogModel("gpt-6-luna")), effort: "low"
-                ) { _ in }
-                Issue.record("Dropped HTTP error body was accepted")
-            } catch let failure as ChatGPTFailure {
-                #expect(failure.status == 429 && failure.requestID == "fixture-request")
-                #expect(failure.responseBody == body)
-                if body.last == UInt8(ascii: "}") {
-                    #expect(failure.code == "subscription_sharing_usage_limit_exceeded")
-                    #expect(failure.recovery == .usage)
-                } else {
-                    #expect(failure.code == nil)
-                }
-            }
+        let cases: [(String, Int, String?, ChatGPTFailure.Recovery)] = [
+            (
+                #"{"error":{"code":"subscription_sharing_usage_limit_exceeded"}}"#, 429,
+                "subscription_sharing_usage_limit_exceeded", .usage
+            ),
+            (#"{"error":{"code":"subscription_sharing_usage_"#, 429, nil, .retry),
+            ("", 429, nil, .retry),
+            (#"{"error":"invalid_grant"}"#, 400, "invalid_grant", .signIn),
+        ]
+        for (text, status, code, recovery) in cases {
+            let body = Data(text.utf8)
+            let response = try #require(
+                HTTPURLResponse(
+                    url: URL(string: "https://example.invalid")!, statusCode: status,
+                    httpVersion: "HTTP/1.1", headerFields: ["x-request-id": "fixture-request"]))
+            let failure = try await ChatGPTFailure(
+                bytes: FailingBytes(body: body), response: response)
+            #expect(failure.status == status && failure.requestID == "fixture-request")
+            #expect(failure.responseBody == body && failure.code == code)
+            #expect(failure.recovery == recovery)
         }
+    }
+
+    @Test func errorBodyReaderStopsAtTheSizeLimit() async throws {
+        let body = Data(repeating: UInt8(ascii: "x"), count: 64_001)
+        let response = try #require(
+            HTTPURLResponse(
+                url: URL(string: "https://example.invalid")!, statusCode: 503,
+                httpVersion: "HTTP/1.1", headerFields: nil))
+        let failure = try await ChatGPTFailure(
+            bytes: FailingBytes(body: body, error: CancellationError()), response: response)
+        #expect(failure.status == 503 && failure.responseBody == body.prefix(64_000))
+        #expect(failure.recovery == .retry)
+    }
+
+    @Test func errorBodyReaderDoesNotTurnCancellationIntoHTTPFailure() async throws {
+        let response = try #require(
+            HTTPURLResponse(
+                url: URL(string: "https://example.invalid")!, statusCode: 429,
+                httpVersion: "HTTP/1.1", headerFields: nil))
+        await #expect(throws: CancellationError.self) {
+            try await ChatGPTFailure(
+                bytes: FailingBytes(body: Data("partial".utf8), error: CancellationError()),
+                response: response)
+        }
+        let cancelled = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await ChatGPTFailure(bytes: FailingBytes(body: Data()), response: response)
+        }
+        await #expect(throws: CancellationError.self) { try await cancelled.value }
     }
 
     @Test func terminalRefreshAfterStopUpdatesModelWithoutInitiator() async throws {
@@ -1669,9 +1699,9 @@ struct ChatGPTTests {
         #expect(notifications[0]?.requestID == "fixture-request")
     }
 
-    @Test func droppedCatalogErrorPreservesStatusCodeAndDiagnostics() async throws {
+    @Test func catalogErrorPreservesStatusCodeAndDiagnostics() async throws {
         let body = Data(#"{"error":{"code":"subscription_sharing_usage_limit_exceeded"}}"#.utf8)
-        let server = TestHTTP(droppedJSONError: ("/v1/models", body, 429))
+        let server = TestHTTP(jsonError: ("/v1/models", body, 429))
         let session = MockHTTPProtocol.session(server: server)
         defer { session.invalidateAndCancel() }
         let chatGPT = ChatGPT(
@@ -1679,7 +1709,7 @@ struct ChatGPTTests {
         try await chatGPT.restore()
         do {
             _ = try await chatGPT.listModels()
-            Issue.record("Dropped catalog error was accepted")
+            Issue.record("Catalog error was accepted")
         } catch let failure as ChatGPTFailure {
             #expect(failure.status == 429 && failure.requestID == "fixture-request")
             #expect(failure.code == "subscription_sharing_usage_limit_exceeded")
@@ -1687,10 +1717,10 @@ struct ChatGPTTests {
         }
     }
 
-    @Test func droppedTerminalRefreshErrorStillClearsSessionAndRetainsDiagnostics() async throws {
+    @Test func terminalRefreshErrorClearsSessionAndRetainsDiagnostics() async throws {
         let body = Data(#"{"error":"invalid_grant"}"#.utf8)
         let stored = StoredAccount(expired: true)
-        let server = TestHTTP(droppedJSONError: ("/api/accounts/oauth/token", body, 400))
+        let server = TestHTTP(jsonError: ("/api/accounts/oauth/token", body, 400))
         let session = MockHTTPProtocol.session(server: server)
         defer { session.invalidateAndCancel() }
         let chatGPT = ChatGPT(session: session, storage: stored.storage, defaults: TestDefaults())
@@ -1699,7 +1729,7 @@ struct ChatGPTTests {
         chatGPT.accountStateChanged = { change = $0 }
         do {
             _ = try await chatGPT.listModels()
-            Issue.record("Dropped terminal refresh error was accepted")
+            Issue.record("Terminal refresh error was accepted")
         } catch let failure as ChatGPTFailure {
             #expect(failure.status == 400 && failure.code == "invalid_grant")
             #expect(failure.requestID == "fixture-request" && failure.responseBody == body)

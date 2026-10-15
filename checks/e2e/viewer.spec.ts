@@ -306,15 +306,14 @@ test("a transient initial connection can establish before its deadline and remai
   relay,
 }) => {
   const sockets: WebSocketRoute[] = [];
-  let silent = true;
+  let allowReconnect = false;
   await page.routeWebSocket("**/rooms/*/socket", (socket) => {
     sockets.push(socket);
-    const server = socket.connectToServer();
-    server.onMessage((message) => {
-      if (!silent) {
-        socket.send(message);
-      }
-    });
+    if (sockets.length === 1) {
+      socket.connectToServer().onMessage(() => {});
+    } else if (allowReconnect) {
+      socket.connectToServer();
+    }
   });
   await relay.publish({ ...empty, live: true });
   await page.clock.install();
@@ -328,7 +327,10 @@ test("a transient initial connection can establish before its deadline and remai
   }
   await first.close({ code: 1001, reason: "Transient initial interruption" });
   await expect(page.getByRole("status")).toHaveText("Reconnecting…");
-  silent = false;
+  allowReconnect = true;
+  for (const socket of sockets.slice(1)) {
+    socket.connectToServer();
+  }
   await page.clock.runFor(2000);
   await expect.poll(() => sockets.length).toBe(2);
   await expect(page.getByRole("status")).toHaveText("Listening");
@@ -916,9 +918,12 @@ test("generation status follows the active request while older answers remain re
   relay,
 }) => {
   const sockets: WebSocketRoute[] = [];
+  let allowReconnect = false;
   await page.routeWebSocket("**/rooms/*/socket", (socket) => {
-    socket.connectToServer();
     sockets.push(socket);
+    if (sockets.length === 1 || allowReconnect) {
+      socket.connectToServer();
+    }
   });
   const older: AnswerCard = {
     id: "older",
@@ -983,6 +988,10 @@ test("generation status follows the active request while older answers remain re
   ).toBeVisible();
   await expect(pane.locator("article")).toHaveAttribute("aria-busy", "false");
   await expect(pane).not.toContainText("Preparing");
+  allowReconnect = true;
+  for (const socket of sockets.slice(1)) {
+    socket.connectToServer();
+  }
   await expect(page.getByRole("status")).toHaveText("Thinking…");
   await expect(pane.locator("article")).toHaveAttribute("aria-busy", "true");
   await relay.writer.close();
@@ -1080,9 +1089,12 @@ test("scrolling, history, reconnect and session switching preserve separate read
 }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
   const sockets: WebSocketRoute[] = [];
+  let allowReconnect = false;
   await page.routeWebSocket("**/rooms/*/socket", (socket) => {
-    socket.connectToServer();
     sockets.push(socket);
+    if (sockets.length === 1 || allowReconnect) {
+      socket.connectToServer();
+    }
   });
   const paragraphs = Array.from(
     { length: 60 },
@@ -1170,6 +1182,10 @@ test("scrolling, history, reconnect and session switching preserve separate read
   }
   await socket.close({ code: 1001, reason: "Reconnect check" });
   await expect(page.getByRole("status")).toHaveText("Reconnecting…");
+  allowReconnect = true;
+  for (const reconnected of sockets.slice(1)) {
+    reconnected.connectToServer();
+  }
   await expect(page.getByRole("status")).toHaveText("Listening");
   await expect
     .poll(async () => await position(pane))
@@ -1427,8 +1443,15 @@ test("a foreground viewer replaces a silent connection and receives the latest e
 }) => {
   const sockets: WebSocketRoute[] = [];
   let silent = false;
+  let allowReconnect = false;
   await page.routeWebSocket("**/rooms/*/socket", (socket) => {
     sockets.push(socket);
+    if (sockets.length > 1) {
+      if (allowReconnect) {
+        socket.connectToServer();
+      }
+      return;
+    }
     const server = socket.connectToServer();
     server.onMessage((message) => {
       if (!silent) {
@@ -1451,7 +1474,10 @@ test("a foreground viewer replaces a silent connection and receives the latest e
   });
   await page.clock.fastForward(40_000);
   await expect(page.getByRole("status")).toHaveText("Reconnecting…");
-  silent = false;
+  allowReconnect = true;
+  for (const socket of sockets.slice(1)) {
+    socket.connectToServer();
+  }
   await page.clock.runFor(2000);
   await expect.poll(() => sockets.length).toBe(2);
   await expect(page.getByRole("status")).toHaveText("Listening");

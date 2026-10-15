@@ -29,6 +29,8 @@ trap 'rm -rf "$STAGING"' EXIT
 STAGED_APP="$STAGING/Skill Issue.app"
 mkdir -p "$STAGED_APP/Contents/MacOS" "$STAGED_APP/Contents/Resources"
 cp "$BIN_PATH/SkillIssue" "$STAGED_APP/Contents/MacOS/SkillIssue"
+iconutil --convert icns "$TASK_ROOT/assets/AppIcon.iconset" \
+	--output "$STAGED_APP/Contents/Resources/AppIcon.icns"
 shopt -s nullglob
 for RESOURCE_BUNDLE in "$BIN_PATH"/*.bundle; do
 	ditto "$RESOURCE_BUNDLE" "$STAGED_APP/Contents/Resources/$(basename "$RESOURCE_BUNDLE")"

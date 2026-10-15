@@ -34,6 +34,26 @@ struct ChatGPTFailure: Error, Sendable {
         }
     }
 
+    init<Bytes: AsyncSequence>(bytes: Bytes, response: HTTPURLResponse) async throws
+    where Bytes.Element == UInt8 {
+        var body = Data()
+        do {
+            for try await byte in bytes {
+                try Task.checkCancellation()
+                body.append(byte)
+                if body.count >= 64_000 { break }
+            }
+        } catch {
+            try Task.checkCancellation()
+            if error is CancellationError { throw error }
+            // Headers and any received error payload remain authoritative
+            // even when the transport drops before the body reaches EOF.
+        }
+        self.init(
+            status: response.statusCode, body: body,
+            requestID: response.value(forHTTPHeaderField: "x-request-id"))
+    }
+
     private init(_ reason: LocalReason) { localReason = reason }
     static let signInRequired = Self(.signIn)
     static let planDisabled = Self(.planDisabled)
