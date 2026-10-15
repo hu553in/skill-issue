@@ -155,3 +155,15 @@ jobs:
           brew tap hu553in/tap
           brew trust --cask hu553in/tap/skill-issue
           brew bump --no-fork --open-pr --cask hu553in/tap/skill-issue
+
+      - name: Assign update pull requests
+        if: ${{ !cancelled() }}
+        env:
+          GH_REPO: hu553in/homebrew-tap
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          pull_requests="$(gh api --paginate "repos/$GH_REPO/pulls?state=open&per_page=100" \
+            --jq '.[] | select(.head.ref | startswith("bump-")) | .number')"
+          for pull_request in $pull_requests; do
+            gh pr edit "$pull_request" --add-assignee "${GH_REPO%%/*}"
+          done
