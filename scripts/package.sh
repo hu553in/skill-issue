@@ -38,6 +38,9 @@ done
 cp "$TASK_ROOT/scripts/Info.plist" "$STAGED_APP/Contents/Info.plist"
 plutil -insert CFBundleShortVersionString -string "$VERSION" "$STAGED_APP/Contents/Info.plist"
 plutil -insert CFBundleVersion -string "$VERSION" "$STAGED_APP/Contents/Info.plist"
+if [[ "$CONFIGURATION" == release && "${GITHUB_REF_TYPE:-}" == tag ]]; then
+	plutil -insert SkillIssueReleaseBuild -bool YES "$STAGED_APP/Contents/Info.plist"
+fi
 plutil -lint "$STAGED_APP/Contents/Info.plist"
 RESOURCE_PATH="$STAGED_APP/Contents/Resources/SkillIssue_SkillIssue.bundle/Contents/Resources/Resources"
 bun -e 'for (const path of process.argv.slice(1)) JSON.parse(await Bun.file(path).text())' \

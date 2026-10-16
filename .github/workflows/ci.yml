@@ -123,6 +123,14 @@ jobs:
           persist-credentials: false
       - id: release-notes
         uses: hu553in/common-things/.github/actions/release-notes@main
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - name: Add release installation instructions
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          CHANGELOG: ${{ steps.release-notes.outputs.changelog }}
+        run: bun scripts/release-notes.ts "$RELEASE_TAG" "$CHANGELOG" > "$RUNNER_TEMP/release.md"
       - uses: actions/download-artifact@v8
         with:
           name: Skill-Issue-macos-arm64.zip
@@ -130,7 +138,7 @@ jobs:
           skip-decompress: true
       - uses: softprops/action-gh-release@v3
         with:
-          body_path: ${{ steps.release-notes.outputs.changelog }}
+          body_path: ${{ runner.temp }}/release.md
           fail_on_unmatched_files: true
           files: dist/Skill-Issue-macos-arm64.zip
 

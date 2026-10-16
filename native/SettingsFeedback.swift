@@ -21,6 +21,9 @@ enum SettingsColors {
 }
 
 struct SettingsHeader: View {
+    #if !README_SCREENSHOTS
+        private let version = AppBuild.releaseVersion ?? "local build"
+    #endif
     let status: String
     let working: Bool
     let live: Bool
@@ -62,8 +65,17 @@ struct SettingsHeader: View {
             HStack(spacing: 8) {
                 Image(systemName: "tortoise.fill").font(.title2)
                     .accessibilityHidden(true)
-                Text("Skill Issue").font(.title2.weight(.semibold))
-                    .accessibilityAddTraits(.isHeader)
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    Text("Skill Issue").font(.title2.weight(.semibold))
+                        .accessibilityAddTraits(.isHeader)
+                    #if !README_SCREENSHOTS
+                        Text(version).font(.subheadline)
+                            .foregroundStyle(Color(nsColor: SettingsColors.secondaryText))
+                            .accessibilityLabel(
+                                AppBuild.releaseVersion == nil
+                                    ? "Local build" : "Version \(version)")
+                    #endif
+                }
             }.layoutPriority(1)
             Spacer(minLength: 0)
             Label {

@@ -76,33 +76,26 @@ struct ViewerAccessConfiguration: View {
             ).font(.callout).foregroundStyle(Color(nsColor: SettingsColors.secondaryText))
                 .fixedSize(horizontal: false, vertical: true)
             VStack(alignment: .leading, spacing: 8) {
-                Link(
+                SettingsLink(
+                    title: "Read the setup guide",
                     destination: URL(
                         string: "https://github.com/hu553in/skill-issue#cloudflare-access")!
-                ) {
-                    Text("Read the setup guide")
-                        .foregroundStyle(Color(nsColor: SettingsColors.link))
-                }.frame(minHeight: 24, alignment: .leading)
-                Link(
+                )
+                SettingsLink(
+                    title: "Open Access applications",
                     destination: URL(
                         string:
                             "https://dash.cloudflare.com/?to=%2F%3Aaccount%2Fone%2Faccess-controls%2Fapps"
                     )!
-                ) {
-                    Text("Open Access applications")
-                        .foregroundStyle(Color(nsColor: SettingsColors.link))
-                }.frame(minHeight: 24, alignment: .leading)
-                Link(
+                )
+                SettingsLink(
+                    title: "Open service tokens",
                     destination: URL(
                         string:
                             "https://dash.cloudflare.com/?to=%2F%3Aaccount%2Fone%2Faccess-controls%2Fservice-credentials%2Fservice-tokens"
                     )!
-                ) {
-                    Text("Open service tokens")
-                        .foregroundStyle(Color(nsColor: SettingsColors.link))
-                }.frame(minHeight: 24, alignment: .leading)
-            }.font(.callout)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                )
+            }.frame(maxWidth: .infinity, alignment: .leading)
             HStack(spacing: 12) {
                 Spacer(minLength: 0)
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)

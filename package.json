@@ -14,6 +14,7 @@
     "build:swift": "bash scripts/package.sh debug",
     "build:release": "bash scripts/package.sh release",
     "run:swift": "bash scripts/build-and-run.sh",
+    "screenshots": "bun scripts/screenshots.ts",
     "lint:web": "bun types:worker && ultracite check && bash scripts/format-config.sh check && stylelint --max-warnings 0 --ignore-path .gitignore 'web/**/*.css' && shfmt -d scripts/*.sh && bunx shellcheck scripts/*.sh",
     "lint:swift": "swift format lint --strict --recursive Package.swift native tests checks/native_relay.swift scripts/quit.swift && swiftlint lint --strict --quiet && swiftc -typecheck -swift-version 6 -warnings-as-errors scripts/quit.swift",
     "lint": "bun lint:web && bun lint:swift && bun check:plist",

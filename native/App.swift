@@ -770,7 +770,7 @@ final class Model: ObservableObject {
     }
 }
 
-private struct SettingsView: View {
+struct SettingsView: View {
     @ObservedObject var model: Model
     @State private var detailsExpanded = false
     let toggleIcon: () -> Void
@@ -928,8 +928,14 @@ private struct SettingsView: View {
                     ForEach(AnswerLanguage.all, id: \.name) { Text($0.label).tag($0.name) }
                 }.disabled(model.working || model.state.live).help(model.lockReason ?? "")
                 LabeledContent("Viewer endpoint") {
-                    TextField("https://…", text: $model.relayURL).textFieldStyle(.roundedBorder)
-                }.disabled(!model.canConfigureViewer).help(model.lockReason ?? "")
+                    HStack(spacing: 12) {
+                        TextField("https://…", text: $model.relayURL).textFieldStyle(.roundedBorder)
+                            .accessibilityLabel("Viewer endpoint")
+                            .disabled(!model.canConfigureViewer).help(model.lockReason ?? "")
+                        SettingsLink(title: "Viewer setup", destination: AppBuild.viewerSetupURL)
+                            .fixedSize()
+                    }
+                }
                 HStack(spacing: 12) {
                     Toggle(
                         "Use Cloudflare Access",
@@ -1202,10 +1208,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // Application entry point called through @main.
     // swiftlint:disable:next unused_declaration
     @MainActor static func main() {
-        let app = NSApplication.shared
-        let delegate = AppDelegate()
-        app.setActivationPolicy(.accessory)
-        app.delegate = delegate
-        withExtendedLifetime(delegate) { app.run() }
+        #if README_SCREENSHOTS
+            ReadmeScreenshots.run()
+        #else
+            let app = NSApplication.shared
+            let delegate = AppDelegate()
+            app.setActivationPolicy(.accessory)
+            app.delegate = delegate
+            withExtendedLifetime(delegate) { app.run() }
+        #endif
     }
 }
