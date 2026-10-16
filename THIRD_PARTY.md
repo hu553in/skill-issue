@@ -8,11 +8,13 @@ pins these dependencies; `Package.resolved` records the transitive dependency tr
 patches are applied. Web runtime dependencies are declared in `package.json` and resolved in
 `bun.lock`.
 
-Builds include dependency license and notice texts with an `index.json` listing resolved versions
-and file paths:
+The Mac app includes dependency license and notice files in
+`Skill Issue.app/Contents/Resources/Notices/`. Its `index.json` lists resolved versions and file
+paths.
 
-- Mac app: `Skill Issue.app/Contents/Resources/Notices/`.
-- Web viewer: `/notices/`, with the index at `/notices/index.json`.
+Vite generates `/notices/index.json` for dependencies included in the web bundle, with their names,
+versions, license identifiers and available license texts. Installed packages that are removed from
+the bundle are excluded.
 
 Both include this repository's `LICENSE` and `THIRD_PARTY.md`.
 

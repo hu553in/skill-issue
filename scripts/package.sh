@@ -43,7 +43,7 @@ RESOURCE_PATH="$STAGED_APP/Contents/Resources/SkillIssue_SkillIssue.bundle/Conte
 bun -e 'for (const path of process.argv.slice(1)) JSON.parse(await Bun.file(path).text())' \
 	"$RESOURCE_PATH/model.json" "$RESOURCE_PATH/answer-languages.json"
 test -s "$RESOURCE_PATH/prompt.md"
-bun scripts/notices.ts swift "$STAGED_APP/Contents/Resources/Notices"
+bun scripts/notices.ts "$STAGED_APP/Contents/Resources/Notices"
 codesign --force --sign - "$STAGED_APP"
 codesign --verify --strict "$STAGED_APP"
 if [[ "$CONFIGURATION" == release ]]; then

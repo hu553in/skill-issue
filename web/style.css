@@ -145,6 +145,10 @@ pre {
   margin-inline: -4px;
 }
 
+pre:has(> .syntax-highlight) {
+  padding: 0;
+}
+
 code {
   font-family: SFMono-Regular, Consolas, monospace;
   font-size: 0.85em;

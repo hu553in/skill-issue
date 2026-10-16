@@ -2,6 +2,19 @@ import { createElement, memo } from "react";
 import type { ComponentProps, ReactNode } from "react";
 import Markdown from "react-markdown";
 import type { Components, ExtraProps } from "react-markdown";
+import {
+  createElement as createHighlightedElement,
+  Prism as SyntaxHighlighter,
+} from "react-syntax-highlighter";
+import vscDarkPlus from "react-syntax-highlighter/dist/esm/styles/prism/vsc-dark-plus";
+
+const languagePattern = /\blanguage-(?<name>\S+)/u;
+// Keep markup punctuation and CDATA readable at normal code sizes.
+const codeTheme = {
+  ...vscDarkPlus,
+  cdata: { color: "#8a8a8a" },
+  "tag.punctuation": { color: "#8a8a8a" },
+};
 
 function anchored(
   tag:
@@ -47,6 +60,46 @@ const Code = ({
     return <code {...props}>{children}</code>;
   }
   const offset = node?.position?.start.offset ?? 0;
+  const language = languagePattern.exec(props.className ?? "")?.groups?.[
+    "name"
+  ];
+  if (language !== undefined) {
+    return (
+      <SyntaxHighlighter
+        className="syntax-highlight"
+        codeTagProps={{ style: { fontSize: "inherit", tabSize: 4 } }}
+        customStyle={{
+          borderRadius: "inherit",
+          fontSize: "inherit",
+          margin: 0,
+        }}
+        language={language}
+        PreTag="div"
+        renderer={({ rows, stylesheet, useInlineStyles }) =>
+          rows.map((row, index): ReactNode =>
+            createHighlightedElement({
+              key: index,
+              node: {
+                ...row,
+                properties: {
+                  className: [],
+                  ...row.properties,
+                  "data-anchor": `code.${offset}.${index}`,
+                },
+              },
+              stylesheet,
+              useInlineStyles,
+            })
+          )
+        }
+        style={codeTheme}
+        wrapLines
+        wrapLongLines
+      >
+        {children.replace(/\n$/u, "")}
+      </SyntaxHighlighter>
+    );
+  }
   return (
     <code {...props}>
       {children.split(/(?<=\n)/u).map((line, index) => (

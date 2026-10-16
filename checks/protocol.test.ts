@@ -223,7 +223,7 @@ test("encrypted history authenticates room, sequence and version", async () => {
 
 test("Markdown retains nested lists, reference links and original code", () => {
   const text =
-    "- Outer item\n\n  Continued explanation.\n\n  - Nested item\n\nUse [the docs][d].\n\n```python\ndef f():\n\n    return '<&>'\n```\n\n[d]: https://example.com\n";
+    "- Outer item\n\n  Continued explanation.\n\n  - Nested item\n\nUse [the docs][d].\n\n```\ndef f():\n\n    return '<&>'\n```\n\n[d]: https://example.com\n";
   const html = renderToStaticMarkup(createElement(Answer, { text }));
   expect(html).toMatch(
     /<li[^>]*>\s*<p[^>]*>Outer item<\/p>\s*<p[^>]*>Continued explanation\.<\/p>\s*<ul>/u
@@ -232,6 +232,19 @@ test("Markdown retains nested lists, reference links and original code", () => {
   expect(html).toContain('rel="noreferrer noopener"');
   expect(html).toContain("    return &#x27;&lt;&amp;&gt;&#x27;\n");
   expect(html).toMatch(/data-anchor="code\.\d+\.2"/u);
+});
+
+test("highlighted code keeps distinct anchors for every line, including blank lines", () => {
+  const html = renderToStaticMarkup(
+    createElement(Answer, {
+      text: "```python\ndef f():\n\n    return '<&>'\n```",
+    })
+  );
+  expect(
+    [...html.matchAll(/data-anchor="(?<id>[^"]+)"/gu)].map(
+      (match) => match.groups?.["id"]
+    )
+  ).toEqual(["pre.0", "code.0.0", "code.0.1", "code.0.2"]);
 });
 
 test("reading chooses a visible leaf inside nested list and code anchors", () => {

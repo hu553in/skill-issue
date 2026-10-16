@@ -1,9 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import nodePath from "node:path";
 
+import { build } from "vite";
+
 import { writeNotices } from "../scripts/notices";
+import viewerConfig from "../web/vite.config";
 
 const { join } = nodePath;
 const roots: string[] = [];
@@ -29,7 +32,7 @@ async function file(root: string, path: string, content: string) {
   await Bun.write(target, content);
 }
 
-test("web notices include installed production texts and omit development dependencies and local paths", async () => {
+test("web notices describe bundled code and retain project license files", async () => {
   const root = await fixture();
   await Promise.all([
     file(
@@ -42,7 +45,16 @@ test("web notices include installed production texts and omit development depend
       })
     ),
     file(root, "runtime/LICENSE", "Runtime permission text\n"),
-    file(root, "runtime/NOTICE/authors.txt", "Runtime attribution\n"),
+    file(
+      root,
+      "runtime/index.js",
+      "export const answer = value => value * 3 + 1;\n"
+    ),
+    file(
+      root,
+      "unused/package.json",
+      JSON.stringify({ license: "MIT", name: "unused", version: "2.0.0" })
+    ),
     file(
       root,
       "development/package.json",
@@ -53,11 +65,19 @@ test("web notices include installed production texts and omit development depend
       root,
       "package.json",
       JSON.stringify({
-        dependencies: { "@fixture/runtime": "file:./runtime" },
+        dependencies: {
+          "@fixture/runtime": "file:./runtime",
+          unused: "file:./unused",
+        },
         devDependencies: { development: "file:./development" },
         name: "fixture",
         private: true,
       })
+    ),
+    file(
+      root,
+      "entry.js",
+      'import {answer} from "@fixture/runtime"; console.log(answer(Date.now()));\n'
     ),
   ]);
   const install = Bun.spawn(
@@ -68,23 +88,31 @@ test("web notices include installed production texts and omit development depend
     throw new Error(await new Response(install.stderr).text());
   }
   const output = join(root, "artifact/notices");
-  await writeNotices(root, "web", output);
-  expect(
-    await readFile(join(output, "npm/@fixture/runtime/1.2.3/LICENSE"), "utf-8")
-  ).toBe("Runtime permission text\n");
-  expect(
-    await readFile(
-      join(output, "npm/@fixture/runtime/1.2.3/NOTICE/authors.txt"),
-      "utf-8"
-    )
-  ).toBe("Runtime attribution\n");
+  await build({
+    ...viewerConfig,
+    build: {
+      ...viewerConfig.build,
+      lib: { entry: join(root, "entry.js"), formats: ["es"] },
+      outDir: join(root, "artifact"),
+    },
+    configFile: false,
+    logLevel: "silent",
+    root,
+  });
   expect(await readFile(join(output, "LICENSE"), "utf-8")).toBe(
-    "Project license text\n"
+    await readFile(new URL("../LICENSE", import.meta.url), "utf-8")
   );
-  const index = await readFile(join(output, "index.json"), "utf-8");
-  expect(index).toContain('"version": "1.2.3"');
-  expect(index).not.toContain("development");
-  expect(index).not.toContain(root);
+  expect(await readFile(join(output, "THIRD_PARTY.md"), "utf-8")).toBe(
+    await readFile(new URL("../THIRD_PARTY.md", import.meta.url), "utf-8")
+  );
+  expect(await Bun.file(join(output, "index.json")).json()).toEqual([
+    {
+      identifier: "MIT",
+      name: "@fixture/runtime",
+      text: "Runtime permission text",
+      version: "1.2.3",
+    },
+  ]);
 });
 
 test("Swift notices preserve nested and binary attribution while excluding stale checkouts and Git internals", async () => {
@@ -118,7 +146,7 @@ test("Swift notices preserve nested and binary attribution while excluding stale
     ),
   ]);
   const output = join(root, "artifact/notices");
-  await writeNotices(root, "swift", output);
+  await writeNotices(root, output);
   expect(
     await readFile(
       join(output, "swift/library/Source/vendor/LICENSE.MIT"),
@@ -156,7 +184,7 @@ test("Swift generation fails for missing checkouts and for attribution without l
     file(root, ".build/checkouts/unrelated/LICENSE", "Unrelated license\n"),
   ]);
   const output = join(root, "artifact/notices");
-  expect(writeNotices(root, "swift", output)).rejects.toThrow(
+  expect(writeNotices(root, output)).rejects.toThrow(
     "Missing checkout for missing"
   );
   await file(
@@ -164,7 +192,7 @@ test("Swift generation fails for missing checkouts and for attribution without l
     ".build/checkouts/missing/NOTICE",
     "Attribution is not the license\n"
   );
-  expect(writeNotices(root, "swift", output)).rejects.toThrow(
+  expect(writeNotices(root, output)).rejects.toThrow(
     "Missing license text for missing"
   );
   expect(await Bun.file(join(output, "index.json")).exists()).toBe(false);
@@ -195,7 +223,7 @@ test.each([
       file(root, `.build/checkouts/${identity}/${path}`, content),
     ]);
     const output = join(root, "artifact/notices");
-    expect(writeNotices(root, "swift", output)).rejects.toThrow(
+    expect(writeNotices(root, output)).rejects.toThrow(
       `Missing license text for ${identity}`
     );
     expect(await Bun.file(join(output, "index.json")).exists()).toBe(false);

@@ -1083,6 +1083,139 @@ test("encrypted answers render Markdown safely and expose session status", async
   expect(errors).toEqual([]);
 });
 
+for (const appearance of [
+  { colorScheme: "light", width: 320 },
+  { colorScheme: "dark", width: 1280 },
+] as const) {
+  test(`highlighted code wraps and preserves reading positions while streaming in ${appearance.colorScheme} mode at ${appearance.width}px`, async ({
+    page,
+    relay,
+  }) => {
+    const errors: Error[] = [];
+    page.on("pageerror", (error) => errors.push(error));
+    await page.setViewportSize({ height: 844, width: appearance.width });
+    await page.emulateMedia({
+      colorScheme: appearance.colorScheme,
+      reducedMotion: "reduce",
+    });
+    const source = [
+      "def describe():",
+      `\tvalue = "<tag>&${"long_token".repeat(30)}"`,
+      "\t# Keep the original whitespace and comments.",
+      "",
+      ...Array.from(
+        { length: 60 },
+        (_, index) => `\tvalue_${index} = ${index}`
+      ),
+    ].join("\n");
+    const answer: AnswerCard = {
+      id: "code",
+      status: "generating",
+      text: `# Code answer\n\n\`\`\`python\n${source}`,
+    };
+    let state: ViewState = {
+      ...empty,
+      answers: [answer],
+      live: true,
+      selectedID: answer.id,
+      selection: 1,
+    };
+    await relay.publish(state);
+    await page.goto(await relay.viewerURL());
+    const pane = page.getByRole("region", { exact: true, name: "Answer" });
+    const code = pane.locator("pre code").first();
+    await expect(code).toHaveText(source);
+    expect(await code.textContent()).toBe(source);
+    const keyword = code.locator(".token").filter({ hasText: /^def$/u });
+    await expect(keyword).toBeVisible();
+    expect(
+      await keyword.evaluate((node) => getComputedStyle(node).color)
+    ).not.toBe(await code.evaluate((node) => getComputedStyle(node).color));
+    expect(await code.evaluate((node) => getComputedStyle(node).tabSize)).toBe(
+      "4"
+    );
+    const initialCodeSize = await code.evaluate(
+      (node) => getComputedStyle(node).fontSize
+    );
+    expect(
+      await code.locator("[data-anchor]").evaluateAll((nodes) => {
+        const ids = nodes.map((node) => node.dataset["anchor"]);
+        return new Set(ids).size === ids.length;
+      })
+    ).toBe(true);
+    expect(
+      await code
+        .locator("..")
+        .evaluate((node) => node.scrollWidth <= node.clientWidth + 1)
+    ).toBe(true);
+    const lineID = `code.${answer.text.indexOf("```python")}.45`;
+    const line = code.locator(`[data-anchor="${lineID}"]`);
+    await line.scrollIntoViewIfNeeded();
+    const before = await visibleAnchor(pane);
+    if (!before) {
+      throw new Error("The code has no visible reading anchor");
+    }
+    expect(before.id).toMatch(/^code\./u);
+    const codeElement = await code.elementHandle();
+    const completed = `${source}\n\treturn value`;
+    const unsupported = "<script>window.codeInjected = true</script>\n  <&>";
+    state = {
+      ...state,
+      answers: [
+        {
+          ...answer,
+          status: "complete",
+          text: `${answer.text}\n\treturn value\n\`\`\`\n\nInline \`a < b\`.\n\n\`\`\`not-a-language\n${unsupported}\n\`\`\`\n\n\`\`\`\nplain code\n\`\`\``,
+        },
+      ],
+    };
+    await relay.publish(state);
+    await expect(code).toHaveText(completed);
+    expect(await code.textContent()).toBe(completed);
+    expect(await codeElement.evaluate((node) => node.isConnected)).toBe(true);
+    expect(await visibleAnchor(pane)).toEqual(before);
+    await expect(pane.locator("pre code").nth(1)).toHaveText(unsupported);
+    await expect(pane.locator("pre code").nth(2)).toHaveText("plain code");
+    await expect(pane.locator("p code")).toHaveText("a < b");
+    await expect(pane.locator("p code [data-anchor]")).toHaveCount(0);
+    await expect(pane.locator("script")).toHaveCount(0);
+    expect(await page.evaluate(() => "codeInjected" in window)).toBe(false);
+    state = { ...state, fontSize: 28 };
+    await relay.publish(state);
+    await expect(pane.locator("article")).toHaveCSS("font-size", "28px");
+    expect(
+      await code.evaluate((node) => getComputedStyle(node).fontSize)
+    ).not.toBe(initialCodeSize);
+    await expect
+      .poll(async () => {
+        const anchor = await visibleAnchor(pane);
+        return anchor?.id;
+      })
+      .toBe(before.id);
+    const resized = await visibleAnchor(pane);
+    expect(Math.abs((resized?.offset ?? 0) - before.offset)).toBeLessThan(2);
+    await relay.publish({
+      ...state,
+      answers: [
+        ...state.answers,
+        { id: "other", status: "complete", text: "Another answer." },
+      ],
+      selectedID: "other",
+      selection: 2,
+    });
+    await expect(pane.getByText("Another answer.")).toBeVisible();
+    await relay.publish({ ...state, selection: 3 });
+    await expect(code).toHaveText(completed);
+    await expect
+      .poll(async () => {
+        const anchor = await visibleAnchor(pane);
+        return anchor?.id;
+      })
+      .toBe(before.id);
+    expect(errors).toEqual([]);
+  });
+}
+
 test("scrolling, history, reconnect and session switching preserve separate reading positions", async ({
   page,
   relay,

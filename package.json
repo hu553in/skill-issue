@@ -10,7 +10,7 @@
     "setup:swift": "brew install swiftlint shfmt",
     "dev": "bun build:web && wrangler dev --port 8787",
     "build": "bun build:web && bun build:swift",
-    "build:web": "vite build web --outDir dist && bun scripts/notices.ts web web/dist/notices",
+    "build:web": "vite build web --outDir dist",
     "build:swift": "bash scripts/package.sh debug",
     "build:release": "bash scripts/package.sh release",
     "run:swift": "bash scripts/build-and-run.sh",
@@ -56,6 +56,7 @@
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "react-markdown": "^10.1.0",
+    "react-syntax-highlighter": "^16.1.2",
     "valibot": "^1.5.0"
   },
   "devDependencies": {
@@ -63,6 +64,7 @@
     "@types/bun": "^1.4.2",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
+    "@types/react-syntax-highlighter": "^15.5.13",
     "@types/ws": "^8.18.2",
     "knip": "^6.41.0",
     "lefthook": "^2.2.1",
