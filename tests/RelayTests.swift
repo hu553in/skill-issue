@@ -83,7 +83,8 @@ private final class TestRelay {
     var silent = false
     var dropCreation = false
     var creationBody: String?
-    var readyMessage = "{\"type\":\"ready\"}"
+    static let publisher = "00000000-0000-0000-0000-000000000002"
+    var readyMessage = "{\"type\":\"ready\",\"client\":\"\(TestRelay.publisher)\"}"
     static let token = String(repeating: "a", count: 43)
     init() throws {
         let parameters = NWParameters.tcp
@@ -126,6 +127,18 @@ private final class TestRelay {
     func disconnect() {
         for socket in sockets { socket.cancel() }
         sockets = []
+    }
+    func send(_ body: [String: Any]) throws {
+        let socket = try #require(sockets.last)
+        let bytes = try JSONSerialization.data(withJSONObject: body)
+        var frame = Data([0x81])
+        if bytes.count < 126 {
+            frame.append(UInt8(bytes.count))
+        } else {
+            frame.append(contentsOf: [126, UInt8(bytes.count >> 8), UInt8(bytes.count & 255)])
+        }
+        frame.append(bytes)
+        socket.send(content: frame, completion: .contentProcessed { _ in })
     }
     func drainPublications() {
         readPublications = true
@@ -521,6 +534,151 @@ private func publication(
         AES.GCM.SealedBox(combined: data), using: SymmetricKey(data: key),
         authenticating: Data("\(fragment[0]):\(packet.seq)".utf8))
     return (packet.seq, try JSONDecoder().decode(ViewState.self, from: plaintext))
+}
+
+private func selectionMessage(
+    viewer: URL, client: String, publisher: String, id: Int, answerID: String
+) throws -> [String: Any] {
+    let fragment = try #require(viewer.fragment).split(separator: ".").map(String.init)
+    let key = try #require(
+        Data(
+            base64Encoded:
+                fragment[2].replacingOccurrences(of: "-", with: "+")
+                .replacingOccurrences(of: "_", with: "/") + "="))
+    let box = try AES.GCM.seal(
+        JSONSerialization.data(withJSONObject: ["answerID": answerID]),
+        using: SymmetricKey(data: key),
+        authenticating: Data("\(fragment[0]):select:\(client):\(publisher):\(id)".utf8))
+    return [
+        "type": "select", "client": client, "publisher": publisher, "id": id,
+        "box": try #require(box.combined).base64EncodedString(),
+    ]
+}
+
+@MainActor
+@Test func viewerSelectionsAuthenticateAndRejectReplaysWithoutDroppingReceipts() async throws {
+    let server = try TestRelay()
+    let base = try await server.start()
+    defer { server.stop() }
+    server.drainPublications()
+    let relay = try await Relay.create(url: base)
+    let reader = "00000000-0000-0000-0000-000000000003"
+    let otherReader = "00000000-0000-0000-0000-000000000004"
+    var state = ViewState(
+        live: true, answers: [AnswerCard(id: "a"), AnswerCard(id: "b"), AnswerCard(id: "c")],
+        selectedID: "c")
+    var applied: [Int] = []
+    relay.onSelection = { answerID, request in
+        guard state.select(answerID: answerID, request: request) else { return }
+        applied.append(request.id)
+        do { try relay.publish(state) } catch { Issue.record(error) }
+    }
+    try relay.publish(state)
+    let monitor = Task { await relay.monitor() }
+    defer { monitor.cancel() }
+    try server.send(["type": "peers", "readers": [reader, otherReader]])
+    let first = try selectionMessage(
+        viewer: relay.viewerURL, client: reader, publisher: TestRelay.publisher, id: 1,
+        answerID: "a")
+    for invalidID in [0, -1, 9_007_199_254_740_992] {
+        try server.send(
+            selectionMessage(
+                viewer: relay.viewerURL, client: reader, publisher: TestRelay.publisher,
+                id: invalidID, answerID: "c"))
+    }
+    for invalidID: Any in [true, 1.5] {
+        var invalid = first
+        invalid["id"] = invalidID
+        try server.send(invalid)
+    }
+    var forged = first
+    forged["client"] = otherReader
+    try server.send(forged)
+    forged = first
+    forged["box"] = "AA=="
+    try server.send(forged)
+    try server.send(
+        selectionMessage(
+            viewer: relay.viewerURL, client: reader,
+            publisher: "00000000-0000-0000-0000-000000000005", id: 100, answerID: "c"))
+    try server.send(first)
+    try server.send(first)
+    for (id, answer) in [(3, "b"), (2, "c"), (3, "c"), (4, "b")] {
+        try server.send(
+            selectionMessage(
+                viewer: relay.viewerURL, client: reader, publisher: TestRelay.publisher, id: id,
+                answerID: answer))
+    }
+    let deadline = ContinuousClock.now + .seconds(5)
+    while server.publications.last?.packet.seq != 4, ContinuousClock.now < deadline {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(applied == [1, 3, 4])
+    #expect(state.selectedID == "b" && state.selection == 3)
+    let received = try server.publications.map { try publication($0, viewer: relay.viewerURL) }
+    #expect(received.compactMap { $0.state.selectionRequest?.id } == [1, 3, 4])
+    #expect(received.map { $0.state.selectedID } == ["c", "a", "b", "b"])
+    try await relay.close()
+    await monitor.value
+}
+
+@MainActor
+@Test func viewerSelectionsAreScopedToTheCurrentReaderAndPublisherConnection() async throws {
+    let server = try TestRelay()
+    let base = try await server.start()
+    defer { server.stop() }
+    let relay = try await Relay.create(url: base)
+    let reader = "00000000-0000-0000-0000-000000000003"
+    let replacement = "00000000-0000-0000-0000-000000000004"
+    var applied: [(answerID: String, id: Int)] = []
+    var connections = 0
+    relay.onConnection = { connected, _, _ in
+        if connected { connections += 1 }
+    }
+    relay.onSelection = { answerID, request in applied.append((answerID, request.id)) }
+    let monitor = Task { await relay.monitor() }
+    defer { monitor.cancel() }
+    let first = try selectionMessage(
+        viewer: relay.viewerURL, client: reader, publisher: TestRelay.publisher, id: 1,
+        answerID: "a")
+    try server.send(first)
+    try server.send(["type": "peers", "readers": [reader]])
+    try server.send(first)
+    try server.send(["type": "peers", "readers": []])
+    try server.send(
+        selectionMessage(
+            viewer: relay.viewerURL, client: reader, publisher: TestRelay.publisher, id: 2,
+            answerID: "a"))
+    // A following peers notification confirms the disconnected-reader request was consumed.
+    try server.send(["type": "peers", "readers": []])
+    let firstDeadline = ContinuousClock.now + .seconds(5)
+    while connections < 3, ContinuousClock.now < firstDeadline {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    try #require(connections >= 3)
+    #expect(applied.map(\.answerID) == ["a"])
+    #expect(applied.map(\.id) == [1])
+    server.readyMessage = "{\"type\":\"ready\",\"client\":\"\(replacement)\"}"
+    server.disconnect()
+    let deadline = ContinuousClock.now + .seconds(7)
+    while server.requests.filter({ $0.path.hasSuffix("/socket") }).count < 2,
+        ContinuousClock.now < deadline
+    { try await Task.sleep(for: .milliseconds(10)) }
+    try #require(server.requests.filter { $0.path.hasSuffix("/socket") }.count == 2)
+    try server.send(["type": "peers", "readers": [reader]])
+    try server.send(first)
+    try server.send(
+        selectionMessage(
+            viewer: relay.viewerURL, client: reader, publisher: replacement, id: 1,
+            answerID: "b"))
+    let selectionDeadline = ContinuousClock.now + .seconds(5)
+    while applied.count < 2, ContinuousClock.now < selectionDeadline {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(applied.map(\.answerID) == ["a", "b"])
+    #expect(applied.map(\.id) == [1, 1])
+    try await relay.close()
+    await monitor.value
 }
 
 @MainActor

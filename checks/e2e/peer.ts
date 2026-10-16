@@ -1,12 +1,19 @@
 import { assert, looseObject, string } from "valibot";
 import { WebSocket } from "ws";
 
-import type { Packet } from "../../protocol";
+import type { ViewerPacket } from "../../protocol";
 
 type Message =
-  | Packet
+  | ViewerPacket
   | { type: "ready"; client: string }
   | { type: "ack"; client: string; seq: number; box: string }
+  | {
+      type: "select";
+      client: string;
+      publisher: string;
+      id: number;
+      box: string;
+    }
   | { type: "peers"; readers: string[] }
   | { type: "offline" }
   | { type: "ended" };

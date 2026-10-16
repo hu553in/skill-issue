@@ -6,7 +6,13 @@ import { promisify } from "node:util";
 import { base64urlnopad } from "@scure/base";
 
 import type { Packet } from "../../protocol";
-import { acknowledgment, decrypt, empty, parseLink } from "../../web/session";
+import {
+  acknowledgment,
+  decrypt,
+  empty,
+  parseLink,
+  selectAnswer,
+} from "../../web/session";
 import { expect, test } from "./fixtures";
 import { Peer } from "./peer";
 
@@ -24,6 +30,8 @@ interface NativeFixture {
     | "zoom-synced"
     | "scroll-pending"
     | "scroll-command-rejected"
+    | "selection-ready"
+    | "selection-repeat-ready"
     | "native-reader-disconnected";
 }
 async function readFixture(file: string): Promise<NativeFixture | null> {
@@ -97,7 +105,7 @@ test.beforeAll("Compile the native relay probe", async ({}, testInfo) => {
   );
 });
 
-test("native relay confirms history, zoom and scroll without conflating viewer presence", async ({
+test("native relay syncs selection, zoom and scroll without conflating viewer presence", async ({
   baseURL,
 }, testInfo) => {
   if (baseURL === undefined || baseURL.length === 0) {
@@ -145,7 +153,7 @@ test("native relay confirms history, zoom and scroll without conflating viewer p
     );
     const ready = await peer.next("ready");
     const packet = await peer.next("state");
-    expect(packet).toEqual(fixture.packet);
+    expect(packet).toMatchObject(fixture.packet);
     const initialState = {
       ...empty,
       answers: [
@@ -256,10 +264,59 @@ test("native relay confirms history, zoom and scroll without conflating viewer p
       await acknowledgment(key, fixture.room, ready.client, scroll.seq, 4)
     );
 
-    const pending = await peer.next("state");
-    expect(pending.seq).toBe(7);
-    expect(await decrypt(key, fixture.room, pending)).toEqual({
+    await waitForStage(fixturePath, "selection-ready");
+    const { publisher } = scroll;
+    if (publisher === null) {
+      throw new Error("The native publisher is disconnected");
+    }
+    const select = async (id: number, answerID: string) =>
+      await selectAnswer(key, fixture.room, ready.client, {
+        answerID,
+        id,
+        publisher,
+      });
+    peer.send(await select(1, "a"));
+    const selected = await peer.next("state");
+    expect(selected.seq).toBe(7);
+    expect(await decrypt(key, fixture.room, selected)).toEqual({
       ...scrollState,
+      selectedID: "a",
+      selection: 2,
+      selectionRequest: { client: ready.client, id: 1 },
+    });
+    peer.send(
+      await acknowledgment(key, fixture.room, ready.client, selected.seq, 4)
+    );
+
+    const navigated = await peer.next("state");
+    expect(navigated.seq).toBe(8);
+    expect(await decrypt(key, fixture.room, navigated)).toEqual({
+      ...scrollState,
+      selection: 3,
+    });
+    peer.send(
+      await acknowledgment(key, fixture.room, ready.client, navigated.seq, 4)
+    );
+    await waitForStage(fixturePath, "selection-repeat-ready");
+    peer.send(await select(2, "b"));
+    const repeated = await peer.next("state");
+    expect(repeated.seq).toBe(9);
+    const repeatedState = {
+      ...scrollState,
+      selection: 4,
+      selectionRequest: { client: ready.client, id: 2 },
+    };
+    expect(await decrypt(key, fixture.room, repeated)).toEqual(repeatedState);
+    peer.send(await select(1, "a"));
+    peer.send(await select(2, "a"));
+    peer.send(
+      await acknowledgment(key, fixture.room, ready.client, repeated.seq, 4)
+    );
+
+    const pending = await peer.next("state");
+    expect(pending.seq).toBe(10);
+    expect(await decrypt(key, fixture.room, pending)).toEqual({
+      ...repeatedState,
       command: { answerID: "b", direction: 1, id: 5 },
     });
     // Neither reader acknowledges this command. Presence remains independent.

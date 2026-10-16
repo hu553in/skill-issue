@@ -114,7 +114,7 @@ test("large snapshots, replacement snapshots and per-reader acknowledgments surv
   };
   const sent = await relay.publish(state);
   const packet = await first.peer.next("state");
-  expect(packet).toEqual(sent);
+  expect(packet).toEqual({ ...sent, publisher: relay.publisher });
   expect(await decrypt(relay.key, relay.room.id, packet)).toEqual(state);
   first.peer.send(
     await acknowledgment(relay.key, relay.room.id, first.client, packet.seq, 1)
@@ -167,6 +167,88 @@ test("large snapshots, replacement snapshots and per-reader acknowledgments surv
       await reconnected.peer.next("state")
     )
   ).toEqual(small);
+});
+
+test("selection requests use authenticated reader identities and cannot cross publisher connections", async ({
+  relay,
+}) => {
+  const reader = await relay.connect("reader");
+  const snapshot = await relay.publish({ ...empty, live: true });
+  expect(await reader.peer.next("state")).toEqual({
+    ...snapshot,
+    publisher: relay.publisher,
+  });
+  const select = {
+    box: "YQ==",
+    id: 1,
+    publisher: relay.publisher,
+    type: "select",
+  };
+  reader.peer.send({ ...select, client: "forged-reader" });
+  expect(await relay.writer.next("select")).toEqual({
+    ...select,
+    client: reader.client,
+  });
+
+  await relay.writer.close();
+  expect(await reader.peer.next("offline")).toEqual({ type: "offline" });
+  const offlineReader = await relay.connect("reader");
+  expect(await offlineReader.peer.next("state")).toEqual({
+    ...snapshot,
+    publisher: null,
+  });
+  reader.peer.send({ ...select, id: 2 });
+
+  const replacement = await relay.connect("writer");
+  const reconnected = await relay.connect("reader");
+  expect(await reconnected.peer.next("state")).toEqual({
+    ...snapshot,
+    publisher: replacement.client,
+  });
+  // An old connection's delayed request must not be replayed on its replacement.
+  reader.peer.send({ ...select, id: 3 });
+  reader.peer.send({ ...select, id: 4, publisher: replacement.client });
+  expect(await replacement.peer.next("select")).toEqual({
+    ...select,
+    client: reader.client,
+    id: 4,
+    publisher: replacement.client,
+  });
+  const fresh = await relay.publish({ ...empty, live: true }, replacement.peer);
+  expect(await reader.peer.next("state")).toEqual({
+    ...fresh,
+    publisher: replacement.client,
+  });
+});
+
+test("malformed selection requests close only their reader", async ({
+  relay,
+}) => {
+  const valid = {
+    box: "YQ==",
+    id: 1,
+    publisher: relay.publisher,
+    type: "select",
+  };
+  for (const fields of [
+    { id: 0 },
+    { publisher: null },
+    { box: "A".repeat(1025) },
+  ]) {
+    // Each malformed peer closes independently while the writer remains available.
+    // oxlint-disable-next-line no-await-in-loop
+    const reader = await relay.connect("reader");
+    reader.peer.send({ ...valid, ...fields });
+    // oxlint-disable-next-line no-await-in-loop
+    const closed = await reader.peer.closed;
+    expect(closed.code).toBe(1008);
+  }
+  const reader = await relay.connect("reader");
+  reader.peer.send(valid);
+  expect(await relay.writer.next("select")).toEqual({
+    ...valid,
+    client: reader.client,
+  });
 });
 
 test("reader tokens cannot authenticate writers, publish snapshots or end the room", async ({
@@ -306,7 +388,10 @@ test("invalid packets close only their peer while extended snapshots and acknowl
 }) => {
   const valid = await relay.publish({ ...empty, live: true });
   const reader = await relay.connect("reader");
-  expect(await reader.peer.next("state")).toEqual(valid);
+  expect(await reader.peer.next("state")).toEqual({
+    ...valid,
+    publisher: relay.publisher,
+  });
   const offender = new Peer(
     `${relay.base.replace(/^http/u, "ws")}/rooms/${relay.room.id}/socket?_pk=attacker-chosen`,
     "reader",
@@ -322,10 +407,14 @@ test("invalid packets close only their peer while extended snapshots and acknowl
   const extended = {
     ...valid,
     extension: { ignored: true },
+    publisher: "forged-publisher",
     seq: valid.seq + 1,
   };
   relay.writer.send(extended);
-  expect(await reader.peer.next("state")).toEqual(extended);
+  expect(await reader.peer.next("state")).toEqual({
+    ...extended,
+    publisher: relay.publisher,
+  });
   reader.peer.send({
     box: "YQ==",
     ignored: true,
@@ -347,5 +436,8 @@ test("invalid packets close only their peer while extended snapshots and acknowl
   const malformedClose = await restored.peer.closed;
   expect(malformedClose.code).toBe(1008);
   const replay = await relay.connect("reader");
-  expect(await replay.peer.next("state")).toEqual(extended);
+  expect(await replay.peer.next("state")).toEqual({
+    ...extended,
+    publisher: null,
+  });
 });

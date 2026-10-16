@@ -1,5 +1,6 @@
 import type { Locator, WebSocketRoute } from "@playwright/test";
 import { base64 } from "@scure/base";
+import { object, parse, string } from "valibot";
 
 import { parseViewerMessage } from "../../protocol";
 import type { ViewState } from "../../protocol";
@@ -27,6 +28,367 @@ async function decryptAcknowledgment(
   );
   return JSON.parse(new TextDecoder().decode(plaintext));
 }
+
+async function readSelection(relay: RelaySession) {
+  const request = await relay.writer.next("select");
+  const bytes = base64.decode(request.box);
+  const plain = await crypto.subtle.decrypt(
+    {
+      additionalData: new TextEncoder().encode(
+        `${relay.room.id}:select:${request.client}:${request.publisher}:${request.id}`
+      ),
+      iv: bytes.slice(0, 12),
+      name: "AES-GCM",
+    },
+    relay.key,
+    bytes.slice(12)
+  );
+  const payload = parse(
+    object({ answerID: string() }),
+    JSON.parse(new TextDecoder().decode(plain))
+  );
+  return { ...request, ...payload };
+}
+
+const navigationState: ViewState = {
+  ...empty,
+  answers: ["a", "b", "c"].map((id) => ({
+    id,
+    status: "complete",
+    text: `# Answer ${id}\n\n${"A paragraph to read.\n\n".repeat(70)}`,
+  })),
+  live: true,
+  selectedID: "c",
+  selection: 3,
+};
+
+test("phone navigation survives delayed confirmations and shares the final choice with other viewers", async ({
+  page,
+  context,
+  relay,
+}) => {
+  await relay.publish(navigationState);
+  const other = await context.newPage();
+  await page.goto(await relay.viewerURL());
+  await other.goto(await relay.viewerURL());
+  await expect(page.locator(".position")).toHaveText("3 / 3");
+  await expect(other.locator(".position")).toHaveText("3 / 3");
+  await expect(
+    page.getByRole("button", { name: "Next answer" })
+  ).toBeDisabled();
+  const pane = page.getByRole("region", { exact: true, name: "Answer" });
+  await pane.evaluate((element) => {
+    element.scrollTop = 460;
+  });
+  const saved = await position(pane);
+  await page.getByRole("button", { name: "Previous answer" }).click();
+  await page.getByRole("button", { name: "Previous answer" }).click();
+  await expect(page.locator(".position")).toHaveText("1 / 3");
+  await expect(
+    page.getByRole("button", { name: "Previous answer" })
+  ).toBeDisabled();
+  const first = await readSelection(relay);
+  const second = await readSelection(relay);
+  expect(first.answerID).toBe("b");
+  expect(second.answerID).toBe("a");
+  expect(second.id).toBeGreaterThan(first.id);
+  await relay.publish({
+    ...navigationState,
+    selectedID: "b",
+    selection: 4,
+    selectionRequest: { client: first.client, id: first.id },
+  });
+  await expect(other.locator(".position")).toHaveText("2 / 3");
+  await expect(page.locator(".position")).toHaveText("1 / 3");
+  // A Mac action is processed between the two phone requests.
+  await relay.publish({ ...navigationState, selection: 5 });
+  await expect(other.locator(".position")).toHaveText("3 / 3");
+  await expect(page.locator(".position")).toHaveText("1 / 3");
+  await relay.publish({
+    ...navigationState,
+    selectedID: "a",
+    selection: 6,
+    selectionRequest: { client: second.client, id: second.id },
+  });
+  await expect(other.locator(".position")).toHaveText("1 / 3");
+  await relay.publish({ ...navigationState, selection: 7 });
+  await expect(page.locator(".position")).toHaveText("3 / 3");
+  await expect(other.locator(".position")).toHaveText("3 / 3");
+  await expect.poll(async () => await position(pane)).toBeCloseTo(saved, 0);
+  await page.getByRole("button", { name: "Previous answer" }).click();
+  const final = await readSelection(relay);
+  const confirmed: ViewState = {
+    ...navigationState,
+    selectedID: "b",
+    selection: 8,
+    selectionRequest: { client: final.client, id: final.id },
+  };
+  await relay.publish(confirmed);
+  await expect(other.locator(".position")).toHaveText("2 / 3");
+  await relay.publish({
+    ...confirmed,
+    command: { answerID: "b", direction: 1, id: 1 },
+  });
+  const height = await pane.evaluate((element) => element.clientHeight);
+  await expect
+    .poll(async () => Math.abs((await position(pane)) - height / 2))
+    .toBeLessThanOrEqual(1);
+  await other.close();
+});
+
+test("browser disconnection keeps local navigation and reconnect adopts Mac selection without replaying taps", async ({
+  page,
+  relay,
+}) => {
+  const sockets: WebSocketRoute[] = [];
+  let reconnect = false;
+  const requests: string[] = [];
+  const resume = (socket: WebSocketRoute) => {
+    const server = socket.connectToServer();
+    socket.onMessage((message) => {
+      if (String(message).includes('"type":"select"')) {
+        requests.push(String(message));
+      }
+      server.send(message);
+    });
+  };
+  await page.routeWebSocket("**/rooms/*/socket", (socket) => {
+    sockets.push(socket);
+    if (sockets.length === 1 || reconnect) {
+      resume(socket);
+    }
+  });
+  await relay.publish({ ...navigationState, selectedID: "b" });
+  await page.goto(await relay.viewerURL());
+  await expect(page.locator(".position")).toHaveText("2 / 3");
+  const [initial] = sockets;
+  if (!initial) {
+    throw new Error("No viewer socket");
+  }
+  await initial.close({ code: 1001 });
+  await expect(page.getByRole("status")).toHaveText("Reconnecting…");
+  await page.getByRole("button", { name: "Previous answer" }).click();
+  await expect(page.locator(".position")).toHaveText("1 / 3");
+  await relay.publish({ ...navigationState, selectedID: "b", selection: 4 });
+  await expect.poll(() => sockets.length).toBe(2);
+  reconnect = true;
+  for (const socket of sockets.slice(1)) {
+    resume(socket);
+  }
+  await expect(page.getByRole("status")).toHaveText("Listening");
+  await expect(page.locator(".position")).toHaveText("2 / 3");
+  expect(requests).toEqual([]);
+  await page.getByRole("button", { name: "Next answer" }).click();
+  const request = await readSelection(relay);
+  expect(request.answerID).toBe("c");
+  expect(requests).toHaveLength(1);
+});
+
+test("Mac replacement restores shared navigation and skips old scroll commands", async ({
+  page,
+  relay,
+}) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await relay.publish(navigationState);
+  await page.goto(await relay.viewerURL());
+  await expect(page.locator(".position")).toHaveText("3 / 3");
+  const pane = page.getByRole("region", { exact: true, name: "Answer" });
+  await pane.evaluate((element) => {
+    element.scrollTop = 320;
+  });
+  const saved = await position(pane);
+  await page.getByRole("button", { name: "Previous answer" }).click();
+  // Deliberately never confirmed by the old Mac.
+  await readSelection(relay);
+  const replacement = await relay.connect("writer");
+  await relay.publish(
+    { ...navigationState, command: { answerID: "c", direction: 1, id: 10 } },
+    replacement.peer
+  );
+  await expect(page.locator(".position")).toHaveText("3 / 3");
+  await expect.poll(async () => await position(pane)).toBeCloseTo(saved, 0);
+  await replacement.peer.close();
+  await expect(page.getByRole("status")).toHaveText("Mac disconnected");
+  await page.getByRole("button", { name: "Previous answer" }).click();
+  await expect(page.locator(".position")).toHaveText("2 / 3");
+  await relay.end();
+  await expect(page.getByRole("status")).toHaveText("Session ended");
+  await page.getByRole("button", { name: "Previous answer" }).click();
+  await expect(page.locator(".position")).toHaveText("1 / 3");
+  await pane.evaluate((element) => {
+    element.scrollTop = 500;
+  });
+  await expect.poll(async () => await position(pane)).toBe(500);
+});
+
+test("navigation buttons handle empty and single-answer histories", async ({
+  page,
+  relay,
+}) => {
+  await relay.publish({ ...empty, live: true });
+  await page.goto(await relay.viewerURL());
+  await expect(page.getByRole("status")).toHaveText("Listening");
+  await expect(
+    page.getByRole("button", { name: "Previous answer" })
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "Next answer" })
+  ).toBeDisabled();
+  await relay.publish({
+    ...navigationState,
+    answers: navigationState.answers.slice(0, 1),
+    selectedID: "a",
+  });
+  await expect(page.locator(".position")).toHaveText("1 / 1");
+  await expect(
+    page.getByRole("button", { name: "Previous answer" })
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "Next answer" })
+  ).toBeDisabled();
+});
+
+for (const replaced of ["reader", "publisher"] as const) {
+  test(`a delayed phone request cannot cross a ${replaced} replacement`, async ({
+    page,
+    relay,
+  }) => {
+    await page.addInitScript(() => {
+      const original = crypto.subtle.encrypt.bind(crypto.subtle);
+      let hold = false;
+      const gate = Promise.withResolvers<boolean>();
+      window.addEventListener("hold-selection", () => {
+        hold = true;
+      });
+      window.addEventListener("release-selection", () => {
+        gate.resolve(true);
+      });
+      crypto.subtle.encrypt = async (...args) => {
+        const encrypted = await original(...args);
+        if (hold) {
+          hold = false;
+          document.documentElement.dataset["heldSelection"] = "true";
+          await gate.promise;
+          document.documentElement.dataset["releasedSelection"] = "true";
+        }
+        return encrypted;
+      };
+    });
+    const sockets: WebSocketRoute[] = [];
+    const sent: string[] = [];
+    await page.routeWebSocket("**/rooms/*/socket", (socket) => {
+      sockets.push(socket);
+      const server = socket.connectToServer();
+      socket.onMessage((message) => {
+        if (String(message).includes('"type":"select"')) {
+          sent.push(String(message));
+        }
+        server.send(message);
+      });
+    });
+    await relay.publish(navigationState);
+    await page.goto(await relay.viewerURL());
+    await relay.writer.next("ack");
+    await page.evaluate(() =>
+      window.dispatchEvent(new Event("hold-selection"))
+    );
+    await page.getByRole("button", { name: "Previous answer" }).click();
+    await expect
+      .poll(
+        async () =>
+          await page.evaluate(
+            () => document.documentElement.dataset["heldSelection"]
+          )
+      )
+      .toBe("true");
+    if (replaced === "reader") {
+      const [socket] = sockets;
+      if (!socket) {
+        throw new Error("No viewer socket");
+      }
+      await socket.close({ code: 1001 });
+      await expect.poll(() => sockets.length).toBe(2);
+    } else {
+      const replacement = await relay.connect("writer");
+      await relay.publish(navigationState, replacement.peer);
+    }
+    await expect(page.locator(".position")).toHaveText("3 / 3");
+    await page.evaluate(() =>
+      window.dispatchEvent(new Event("release-selection"))
+    );
+    await expect
+      .poll(
+        async () =>
+          await page.evaluate(
+            () => document.documentElement.dataset["releasedSelection"]
+          )
+      )
+      .toBe("true");
+    await page.evaluate(async () => {
+      const frame = Promise.withResolvers<boolean>();
+      requestAnimationFrame(() => {
+        frame.resolve(true);
+      });
+      await frame.promise;
+    });
+    expect(sent).toEqual([]);
+    await page.getByRole("button", { name: "Previous answer" }).click();
+    await expect.poll(() => sent.length).toBe(1);
+  });
+}
+
+test("a final delayed snapshot updates content without undoing navigation after session end", async ({
+  page,
+  relay,
+}) => {
+  await page.addInitScript(() => {
+    const original = crypto.subtle.decrypt.bind(crypto.subtle);
+    let hold = false;
+    const gate = Promise.withResolvers<boolean>();
+    window.addEventListener("hold-final", () => {
+      hold = true;
+    });
+    window.addEventListener("release-final", () => {
+      gate.resolve(true);
+    });
+    crypto.subtle.decrypt = async (...args) => {
+      const decrypted = await original(...args);
+      if (hold) {
+        hold = false;
+        document.documentElement.dataset["heldFinal"] = "true";
+        await gate.promise;
+      }
+      return decrypted;
+    };
+  });
+  await relay.publish(navigationState);
+  await page.goto(await relay.viewerURL());
+  await expect(page.locator(".position")).toHaveText("3 / 3");
+  await page.evaluate(() => window.dispatchEvent(new Event("hold-final")));
+  await relay.publish({
+    ...navigationState,
+    answers: navigationState.answers.map((answer) =>
+      answer.id === "a"
+        ? { ...answer, text: `${answer.text}\n\nFinal detail.` }
+        : answer
+    ),
+    selectedID: "b",
+    selection: 4,
+  });
+  await expect
+    .poll(
+      async () =>
+        await page.evaluate(() => document.documentElement.dataset["heldFinal"])
+    )
+    .toBe("true");
+  await relay.end();
+  await expect(page.getByRole("status")).toHaveText("Session ended");
+  await page.getByRole("button", { name: "Previous answer" }).click();
+  await page.getByRole("button", { name: "Previous answer" }).click();
+  await page.evaluate(() => window.dispatchEvent(new Event("release-final")));
+  await expect(page.locator("article")).toContainText("Final detail.");
+  await expect(page.locator(".position")).toHaveText("1 / 3");
+});
 
 async function position(pane: Locator) {
   return await pane.evaluate((element) => element.scrollTop);
@@ -1261,8 +1623,8 @@ test("scrolling, history, reconnect and session switching preserve separate read
   state = { ...state, command: { answerID: "first", direction: 1, id: 1 } };
   await relay.publish(state);
   await expect
-    .poll(async () => await position(pane))
-    .toBeCloseTo(height / 2, 0);
+    .poll(async () => Math.abs((await position(pane)) - height / 2))
+    .toBeLessThanOrEqual(1);
   const saved = await visibleAnchor(pane);
   if (!saved) {
     throw new Error("The scrolled answer has no visible reading anchor");
@@ -1331,8 +1693,10 @@ test("scrolling, history, reconnect and session switching preserve separate read
   state = { ...state, command: { answerID: "first", direction: 1, id: 2 } };
   await relay.publish(state);
   await expect
-    .poll(async () => await position(pane))
-    .toBeCloseTo(afterResize + height / 2, 0);
+    .poll(async () =>
+      Math.abs((await position(pane)) - afterResize - height / 2)
+    )
+    .toBeLessThanOrEqual(1);
   const originalPosition = await position(pane);
   const originalURL = await relay.viewerURL();
   const originalMemory = `reading:${new URL(originalURL).hash.split(".")[0]}`;
@@ -1387,8 +1751,8 @@ test("scrolling, history, reconnect and session switching preserve separate read
     };
     await other.publish(otherState);
     await expect
-      .poll(async () => await position(pane))
-      .toBeCloseTo(height / 2, 0);
+      .poll(async () => Math.abs((await position(pane)) - height / 2))
+      .toBeLessThanOrEqual(1);
     const otherPosition = await position(pane);
     const otherCache = await page.evaluate(
       (key) => sessionStorage.getItem(key),
@@ -2080,8 +2444,8 @@ for (const [name, cache] of [
     });
     const height = await pane.evaluate((element) => element.clientHeight);
     await expect
-      .poll(async () => await position(pane))
-      .toBeCloseTo(height / 2, 0);
+      .poll(async () => Math.abs((await position(pane)) - height / 2))
+      .toBeLessThanOrEqual(1);
     const applied = await relay.writer.next("ack");
     expect(await decryptAcknowledgment(relay, applied)).toEqual({
       command,

@@ -24,7 +24,8 @@ export const ViewStateSchema = v.object({
   modifiers: v.string(),
   selectedID: v.nullish(v.string()),
   selection: v.pipe(v.number(), v.safeInteger(), v.minValue(0)),
-  version: v.literal(1),
+  selectionRequest: v.nullish(v.object({ client: v.string(), id: sequence })),
+  version: v.literal(2),
 });
 export type ViewState = v.InferOutput<typeof ViewStateSchema>;
 
@@ -34,14 +35,25 @@ export const StatePacketSchema = v.object({
   type: v.literal("state"),
 });
 export type Packet = v.InferOutput<typeof StatePacketSchema>;
+const ViewerStatePacketSchema = v.object({
+  ...StatePacketSchema.entries,
+  publisher: v.nullable(v.string()),
+});
+export type ViewerPacket = v.InferOutput<typeof ViewerStatePacketSchema>;
 export const AckPacketSchema = v.object({
   box: v.pipe(encoded, v.maxLength(1024)),
   seq: sequence,
   type: v.literal("ack"),
 });
+export const SelectPacketSchema = v.object({
+  box: v.pipe(encoded, v.maxLength(1024)),
+  id: sequence,
+  publisher: v.string(),
+  type: v.literal("select"),
+});
 const viewerMessage = v.variant("type", [
   v.object({ client: v.string(), type: v.literal("ready") }),
-  StatePacketSchema,
+  ViewerStatePacketSchema,
   v.object({ type: v.literal("offline") }),
   v.object({ type: v.literal("ended") }),
 ]);

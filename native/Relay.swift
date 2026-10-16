@@ -46,8 +46,11 @@ final class Relay {
     private var pendingBytes = 0
     private var readers: Set<String> = []
     private var acknowledgments: [String: Int] = [:]
+    private var publisher: String?
+    private var selections: [String: Int] = [:]
     var onConnection: ((Bool, Int, Int) -> Void)?
     var onFailure: ((Error) -> Void)?
+    var onSelection: ((String, ViewerSelectionRequest) -> Void)?
 
     private init(
         base: URL, credentials: ViewerAccessCredentials?, session: URLSession,
@@ -150,11 +153,14 @@ final class Relay {
             try Task.checkCancellation()
             guard case .string(let text) = message,
                 let ready = try JSONSerialization.jsonObject(with: Data(text.utf8))
-                    as? [String: Any], ready["type"] as? String == "ready", !closed
+                    as? [String: Any], ready["type"] as? String == "ready",
+                let client = ready["client"] as? String, UUID(uuidString: client) != nil, !closed
             else { throw AppFailure.failed }
             socket = next
+            publisher = client
             readers = []
             acknowledgments = [:]
+            selections = [:]
             onConnection?(true, 0, 0)
             if let latest { try publish(latest) }
         } catch {
@@ -228,9 +234,11 @@ final class Relay {
     private func connectionLost() {
         socket?.cancel(with: .goingAway, reason: nil)
         socket = nil
+        publisher = nil
         cancelSending()
         readers = []
         acknowledgments = [:]
+        selections = [:]
         onConnection?(false, 0, 0)
     }
     func monitor() async {
@@ -239,6 +247,7 @@ final class Relay {
                 if socket == nil { try await connect() }
                 guard let socket else { continue }
                 let message = try await socket.receive()
+                guard self.socket === socket else { continue }
                 guard case .string(let text) = message,
                     let body = try JSONSerialization.jsonObject(with: Data(text.utf8))
                         as? [String: Any]
@@ -246,9 +255,11 @@ final class Relay {
                 if body["type"] as? String == "peers", let ids = body["readers"] as? [String] {
                     readers = Set(ids)
                     acknowledgments = acknowledgments.filter { readers.contains($0.key) }
+                    selections = selections.filter { readers.contains($0.key) }
                     connectionChanged()
                 }
                 if body["type"] as? String == "ack" { try? acceptAcknowledgment(body) }
+                if body["type"] as? String == "select" { try? acceptSelection(Data(text.utf8)) }
             } catch {
                 connectionLost()
                 if !closed && !Task.isCancelled, (error as? ViewerFailure)?.stopsSession == true {
@@ -258,6 +269,29 @@ final class Relay {
                 if !closed && !Task.isCancelled { try? await Task.sleep(for: .seconds(2)) }
             }
         }
+    }
+    private func acceptSelection(_ data: Data) throws {
+        struct Envelope: Decodable {
+            let client: String
+            let publisher: String
+            let id: Int
+            let box: String
+        }
+        struct Selection: Decodable { let answerID: String }
+        let request = try JSONDecoder().decode(Envelope.self, from: data)
+        guard request.publisher == publisher, readers.contains(request.client),
+            request.id > (selections[request.client] ?? 0), request.id <= 9_007_199_254_740_991,
+            request.box.utf8.count <= 1024, let bytes = Data(base64Encoded: request.box)
+        else { return }
+        let box = try AES.GCM.SealedBox(combined: bytes)
+        let plain = try AES.GCM.open(
+            box, using: key,
+            authenticating: Data(
+                "\(room):select:\(request.client):\(request.publisher):\(request.id)".utf8))
+        let selection = try JSONDecoder().decode(Selection.self, from: plain)
+        selections[request.client] = request.id
+        onSelection?(
+            selection.answerID, ViewerSelectionRequest(client: request.client, id: request.id))
     }
     private func acceptAcknowledgment(_ body: [String: Any]) throws {
         guard let client = body["client"] as? String, readers.contains(client),
@@ -286,6 +320,8 @@ final class Relay {
         closed = true
         socket?.cancel(with: .normalClosure, reason: nil)
         socket = nil
+        publisher = nil
+        selections = [:]
         cancelSending()
         defer { session.invalidateAndCancel() }
         var request = Self.request(

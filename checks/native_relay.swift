@@ -76,6 +76,13 @@ import JOSESwift
             selectedID: "a",
             command: ViewerCommand(id: 3, answerID: "a", direction: 1)
         )
+        var selections: [ViewerSelectionRequest] = []
+        var selectionError: Error?
+        relay.onSelection = { answerID, request in
+            guard state.select(answerID: answerID, request: request) else { return }
+            selections.append(request)
+            do { try relay.publish(state) } catch { selectionError = error }
+        }
         try relay.publish(state)
         let (packet, received) = try await snapshot(socket, room: parts[0], key: keyData)
         guard packet.seq == 1, received == state, viewerCount == 1, appliedCount == 0 else {
@@ -152,13 +159,41 @@ import JOSESwift
         try report("scroll-command-rejected", packet: scroll)
         try await wait { appliedCount == 1 }
 
+        try report("selection-ready", packet: scroll)
+        try await wait { selections.count == 1 }
+        if let selectionError { throw selectionError }
+        let (selected, selectedState) = try await snapshot(socket, room: parts[0], key: keyData)
+        guard selected.seq == 7, selectedState == state, state.selectedID == "a",
+            state.selection == 2, state.selectionRequest?.id == 1
+        else { throw AppFailure.failed }
+        try await wait { appliedCount == 1 }
+
+        state.select(1)
+        try relay.publish(state)
+        let (navigated, navigatedState) = try await snapshot(socket, room: parts[0], key: keyData)
+        guard navigated.seq == 8, navigatedState == state, state.selectedID == "b",
+            state.selection == 3, state.selectionRequest == nil
+        else { throw AppFailure.failed }
+        try await wait { appliedCount == 1 }
+        try report("selection-repeat-ready", packet: navigated)
+        try await wait { selections.count == 2 }
+        if let selectionError { throw selectionError }
+        let (repeated, repeatedState) = try await snapshot(socket, room: parts[0], key: keyData)
+        guard repeated.seq == 9, repeatedState == state, state.selectedID == "b",
+            state.selection == 4, state.selectionRequest?.id == 2
+        else { throw AppFailure.failed }
+        // The reader sends stale/duplicate selections before acknowledging this snapshot.
+        try await wait { appliedCount == 1 }
+        guard selections.map(\.id) == [1, 2], state.selectedID == "b", state.selection == 4
+        else { throw AppFailure.failed }
+
         state.scroll(1)
         try relay.publish(state)
         guard viewerCount == 2, appliedCount == 0, connectionCounts.allSatisfy({ $0 > 0 }) else {
             throw AppFailure.failed
         }
         let (pending, pendingState) = try await snapshot(socket, room: parts[0], key: keyData)
-        guard pending.seq == 7, pendingState == state else { throw AppFailure.failed }
+        guard pending.seq == 10, pendingState == state else { throw AppFailure.failed }
         socket.cancel(with: .normalClosure, reason: nil)
         try await wait { viewerCount == 1 }
         guard connected, appliedCount == 0 else { throw AppFailure.failed }

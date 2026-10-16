@@ -73,15 +73,20 @@ struct ViewerCommand: Codable, Equatable, Sendable {
     var answerID: String?
     var direction: Int
 }
+struct ViewerSelectionRequest: Codable, Equatable, Sendable {
+    var client: String
+    var id: Int
+}
 struct ViewState: Codable, Equatable, Sendable {
     // Codable sends this protocol version to the web viewer.
     // swiftlint:disable:next unused_declaration
-    var version = 1
+    var version = 2
     var live = false
     var canAnswer = false
     var answers: [AnswerCard] = []
     var selectedID: String?
     var selection = 0
+    var selectionRequest: ViewerSelectionRequest?
     var command: ViewerCommand?
     var fontSize = 20
     var language = "English"
@@ -96,11 +101,21 @@ struct ViewState: Codable, Equatable, Sendable {
         guard next != current else { return }
         selectedID = answers[next].id
         selection += 1
+        selectionRequest = nil
+    }
+    mutating func select(answerID: String, request: ViewerSelectionRequest) -> Bool {
+        guard live, answers.contains(where: { $0.id == answerID }) else { return false }
+        selectedID = answerID
+        // Even an unchanged answer acknowledges this particular viewer action.
+        selection += 1
+        selectionRequest = request
+        return true
     }
     mutating func beginAnswer(id: String) {
         answers.append(AnswerCard(id: id))
         selectedID = id
         selection += 1
+        selectionRequest = nil
     }
     mutating func scroll(_ direction: Int) {
         command = ViewerCommand(

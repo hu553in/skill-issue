@@ -7,6 +7,7 @@ import {
   ViewerLinkSchema,
   ViewStateSchema,
 } from "../protocol";
+import type { SelectionCommand } from "./selection";
 
 export const empty: ViewState = {
   answers: [],
@@ -17,7 +18,7 @@ export const empty: ViewState = {
   live: false,
   modifiers: "⌃⌥⌘",
   selection: 0,
-  version: 1,
+  version: 2,
 };
 export const failure = "Couldn't complete that.";
 export function parseLink(fragment: string) {
@@ -104,4 +105,35 @@ export async function acknowledgment(
   box.set(iv);
   box.set(cipher, iv.length);
   return JSON.stringify({ box: base64.encode(box), seq, type: "ack" });
+}
+
+export async function selectAnswer(
+  key: CryptoKey,
+  room: string,
+  client: string,
+  { answerID, id, publisher }: SelectionCommand
+) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const cipher = new Uint8Array(
+    await crypto.subtle.encrypt(
+      {
+        additionalData: new TextEncoder().encode(
+          `${room}:select:${client}:${publisher}:${id}`
+        ),
+        iv,
+        name: "AES-GCM",
+      },
+      key,
+      new TextEncoder().encode(JSON.stringify({ answerID }))
+    )
+  );
+  const box = new Uint8Array(iv.length + cipher.length);
+  box.set(iv);
+  box.set(cipher, iv.length);
+  return JSON.stringify({
+    box: base64.encode(box),
+    id,
+    publisher,
+    type: "select",
+  });
 }

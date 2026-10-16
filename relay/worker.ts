@@ -4,11 +4,12 @@ import type { MiddlewareHandler } from "hono";
 import { HonoBase } from "hono/hono-base";
 import { TrieRouter } from "hono/router/trie-router";
 import { secureHeaders } from "hono/secure-headers";
-import { parse } from "valibot";
+import { looseObject, parse, variant } from "valibot";
 
 import {
   AckPacketSchema,
   maxPacketLength,
+  SelectPacketSchema,
   StatePacketSchema,
 } from "../protocol";
 
@@ -27,6 +28,8 @@ interface Latest {
   chunks: number;
 }
 const ROOM_TTL = 2 * 60 * 60 * 1000;
+const storedState = looseObject(StatePacketSchema.entries);
+const readerPacket = variant("type", [AckPacketSchema, SelectPacketSchema]);
 const secret = () =>
   base64urlnopad.encode(crypto.getRandomValues(new Uint8Array(32)));
 const hash = async (value: string) =>
@@ -231,18 +234,15 @@ export class Room extends DurableObject<Env> {
     if (role === "reader") {
       const latest = await this.latest();
       if (latest !== undefined && latest.length > 0) {
-        notify(pair[1], latest);
+        notify(
+          pair[1],
+          JSON.stringify({
+            ...parse(storedState, JSON.parse(latest)),
+            publisher: this.publisher()?.id ?? null,
+          })
+        );
       }
-      if (
-        !this.ctx
-          .getWebSockets()
-          .some(
-            (socket) =>
-              socket.readyState === WebSocket.OPEN &&
-              attachment(socket).role === "writer" &&
-              !attachment(socket).retired
-          )
-      ) {
+      if (!this.publisher()) {
         notify(pair[1], '{"type":"offline"}');
       }
     }
@@ -274,30 +274,27 @@ export class Room extends DurableObject<Env> {
         throw new Error("Invalid room message");
       }
       const latest = await this.ctx.storage.get<Latest>("snapshot");
+      if (socket.readyState !== WebSocket.OPEN || attachment(socket).retired) {
+        return;
+      }
       if (peer.role === "reader") {
-        const ack = parse(AckPacketSchema, body);
-        if (ack.seq > (latest?.seq ?? 0)) {
+        const packet = parse(readerPacket, body);
+        if (packet.type === "ack" && packet.seq > (latest?.seq ?? 0)) {
           throw new Error("Invalid room message");
         }
-        for (const writer of this.ctx.getWebSockets()) {
-          if (
-            attachment(writer).role === "writer" &&
-            !attachment(writer).retired
-          ) {
-            notify(
-              writer,
-              JSON.stringify({
-                box: ack.box,
-                client: peer.id,
-                seq: ack.seq,
-                type: "ack",
-              })
-            );
-          }
+        const publisher = this.publisher();
+        if (
+          publisher &&
+          (packet.type === "ack" || packet.publisher === publisher.id)
+        ) {
+          notify(
+            publisher.socket,
+            JSON.stringify({ ...packet, client: peer.id })
+          );
         }
         return;
       }
-      const state = parse(StatePacketSchema, body);
+      const state = parse(storedState, body);
       if (
         peer.role !== "writer" ||
         attachment(socket).retired ||
@@ -324,9 +321,13 @@ export class Room extends DurableObject<Env> {
           await transaction.setAlarm(session.expires);
         }
       });
+      if (attachment(socket).retired) {
+        return;
+      }
+      const outgoing = JSON.stringify({ ...state, publisher: peer.id });
       for (const reader of this.ctx.getWebSockets()) {
         if (attachment(reader).role === "reader") {
-          notify(reader, message);
+          notify(reader, outgoing);
         }
       }
     } catch {
@@ -342,6 +343,17 @@ export class Room extends DurableObject<Env> {
     const keys = Array.from({ length: meta.chunks }, (_, i) => `part:${i}`);
     const parts = await this.ctx.storage.get<string>(keys);
     return keys.map((key) => parts.get(key) ?? "").join("");
+  }
+  private publisher() {
+    const socket = this.ctx.getWebSockets().find((candidate) => {
+      const peer = attachment(candidate);
+      return (
+        candidate.readyState === WebSocket.OPEN &&
+        peer.role === "writer" &&
+        !peer.retired
+      );
+    });
+    return socket ? { id: attachment(socket).id, socket } : undefined;
   }
   private peersChanged() {
     const sockets = this.ctx

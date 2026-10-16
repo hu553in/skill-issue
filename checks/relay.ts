@@ -15,6 +15,7 @@ export class RelaySession {
   readonly writer: Peer;
   readonly clientIP: string | undefined;
   readonly peers: Peer[] = [];
+  publisher = "";
   private sequence = 0;
   private ended = false;
 
@@ -51,7 +52,8 @@ export class RelaySession {
     const session = new RelaySession(base, room, key, writer, clientIP);
     session.peers.push(writer);
     try {
-      await writer.next("ready");
+      const ready = await writer.next("ready");
+      session.publisher = ready.client;
       return session;
     } catch (error) {
       try {

@@ -9,6 +9,7 @@ import {
   AckPacketSchema,
   maxPacketLength,
   parseViewerMessage,
+  SelectPacketSchema,
   StatePacketSchema,
   ViewStateSchema,
 } from "../protocol";
@@ -33,7 +34,7 @@ test("decrypted snapshots reject invalid domain fields without coercion", () => 
     true
   );
   const invalid = [
-    { version: 2 },
+    { version: 1 },
     { live: "true" },
     { canAnswer: "true" },
     { canAnswer: undefined },
@@ -46,6 +47,9 @@ test("decrypted snapshots reject invalid domain fields without coercion", () => 
     { selection: -1 },
     { selection: 1.5 },
     { selection: Number.MAX_SAFE_INTEGER + 1 },
+    { selectionRequest: { client: 1, id: 1 } },
+    { selectionRequest: { client: "viewer", id: 0 } },
+    { selectionRequest: { client: "viewer", id: 1.5 } },
     { fontSize: 15 },
     { fontSize: 41 },
     { fontSize: "20" },
@@ -86,6 +90,16 @@ test("protocol schemas preserve ignored extensions and enforce recognized packet
   expect(parseViewerMessage({ extra: true, type: "ended" })).toEqual({
     type: "ended",
   });
+  for (const publisher of ["writer", null]) {
+    expect(
+      parseViewerMessage({ box: "AAAA", publisher, seq: 1, type: "state" })
+    ).toEqual({ box: "AAAA", publisher, seq: 1, type: "state" });
+  }
+  for (const publisher of [undefined, 1, false]) {
+    expect(() =>
+      parseViewerMessage({ box: "AAAA", publisher, seq: 1, type: "state" })
+    ).toThrow();
+  }
   expect(
     safeParse(StatePacketSchema, {
       box: "A".repeat(maxPacketLength),
@@ -118,6 +132,32 @@ test("protocol schemas preserve ignored extensions and enforce recognized packet
     safeParse(AckPacketSchema, { box: "A".repeat(1025), seq: 1, type: "ack" })
       .success
   ).toBe(false);
+});
+
+test("selection packets bound request IDs and ciphertext without accepting malformed publishers", () => {
+  const valid = {
+    box: "A".repeat(1024),
+    id: 1,
+    publisher: "writer",
+    type: "select",
+  };
+  expect(safeParse(SelectPacketSchema, valid).success).toBe(true);
+  for (const fields of [
+    { id: 0 },
+    { id: -1 },
+    { id: 1.5 },
+    { id: Number.MAX_SAFE_INTEGER + 1 },
+    { id: "1" },
+    { publisher: null },
+    { publisher: 1 },
+    { box: "A".repeat(1025) },
+    { box: "not base64" },
+    { type: "state" },
+  ]) {
+    expect(safeParse(SelectPacketSchema, { ...valid, ...fields }).success).toBe(
+      false
+    );
+  }
 });
 
 test("encrypted history authenticates room, sequence and version", async () => {
@@ -181,7 +221,7 @@ test("encrypted history authenticates room, sequence and version", async () => {
   );
   await Promise.all(
     [
-      { ...state, version: 2 },
+      { ...state, version: 1 },
       { ...state, command: 0 },
       { ...state, command: false },
       { ...state, command: "" },

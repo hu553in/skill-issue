@@ -127,6 +127,41 @@ import Testing
     #expect(state.command == ViewerCommand(id: 2, answerID: "b", direction: -1))
 }
 
+@Test func viewerSelectionUsesTheSameCursorAsMacControls() {
+    let request = ViewerSelectionRequest(client: "reader", id: 1)
+    var state = ViewState(live: true)
+    state.beginAnswer(id: "a")
+    state.beginAnswer(id: "b")
+    state.beginAnswer(id: "c")
+    let selected = state.select(answerID: "a", request: request)
+    #expect(selected)
+    #expect(state.selection == 4)
+    #expect(state.selectionRequest == request)
+    state.scroll(1)
+    #expect(state.command?.answerID == "a")
+    state.select(1)
+    #expect(state.selectedID == "b")
+    #expect(state.selectionRequest == nil)
+    #expect(state.selection == 5)
+
+    let selectedAgain = state.select(answerID: "b", request: request)
+    #expect(selectedAgain)
+    #expect(state.selection == 6)
+    #expect(state.selectionRequest == request)
+    let beforeInvalid = state
+    let selectedMissing = state.select(answerID: "missing", request: request)
+    #expect(!selectedMissing)
+    #expect(state == beforeInvalid)
+    state.beginAnswer(id: "d")
+    #expect(state.selectionRequest == nil)
+    #expect(state.selectedID == "d")
+    state.live = false
+    let ended = state
+    let selectedAfterEnd = state.select(answerID: "a", request: request)
+    #expect(!selectedAfterEnd)
+    #expect(state == ended)
+}
+
 @Test(.enabled(if: ProcessInfo.processInfo.environment["SKILL_ISSUE_ASR_CHECK_DIR"] != nil))
 func twoSourcesAndAnswerCuts() async throws {
     let directory = URL(

@@ -42,6 +42,50 @@ body {
   white-space: nowrap;
 }
 
+.navigation {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-inline-start: -12px;
+}
+
+.navigation button {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  flex: none;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 1.25rem;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.navigation button:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.navigation button:focus-visible {
+  outline: 2px solid currentcolor;
+  outline-offset: 2px;
+}
+
+.navigation button:enabled:active {
+  background: color-mix(in srgb, currentcolor 16%, transparent);
+}
+
+@media (hover: hover) {
+  .navigation button:enabled:hover {
+    background: color-mix(in srgb, currentcolor 10%, transparent);
+  }
+}
+
 .status {
   display: inline-flex;
   margin-inline-start: auto;

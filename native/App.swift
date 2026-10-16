@@ -549,6 +549,12 @@ final class Model: ObservableObject {
                     guard let self, self.sessionID == session else { return }
                     self.endSession(failed: true, error: error)
                 }
+                relay.onSelection = { [weak self] answerID, request in
+                    guard let self, self.sessionID == session,
+                        self.state.select(answerID: answerID, request: request)
+                    else { return }
+                    self.publish()
+                }
                 operation = .starting("Starting capture…")
                 try await capture.start(
                     microphone: microphone,

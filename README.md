@@ -184,8 +184,13 @@ restarts and updates every shortcut hint, including the viewer.
 | + / − | Increase / decrease text size, keeping your reading position |
 | H     | Hide / show the app's menu bar icon                          |
 
-The viewer shows one answer at a time. Streaming and reconnects preserve your selection and reading
-position. **Thinking** refers to the current request, including when you read an earlier answer.
+The viewer shows one answer at a time. Use its **← / →** buttons or the Mac shortcuts to switch
+answers. While connected, both share the same selection; the last change processed by the Mac wins.
+Each answer keeps its reading position, and streaming does not scroll it down automatically.
+**Thinking** refers to the current request, including when you read an earlier answer.
+
+If the connection drops, you can keep browsing answers already received in the open viewer. When the
+connection returns, the viewer follows the Mac's current selection; offline taps are not replayed.
 
 - **Request again:** Space cancels the current generation and captures fresh context. Its partial
   answer stays in history. Holding Space does not repeat requests.
@@ -225,8 +230,8 @@ saved for repeat sign-in. If OpenAI cannot confirm remote sign-out, use
 ### End a session
 
 Select **Stop session** to stop capture and request deletion of the session from the relay. An
-already open viewer can keep the displayed answer, but the Mac's reading controls stop working.
-Reloading or reopening the link cannot restore a deleted session.
+already open viewer can still browse received answers with its **← / →** buttons and scroll
+normally. Reloading or reopening the link cannot restore a deleted session.
 
 **Starting a new session clears the previous answers and captured context. Quitting the app discards
 its history.** The **Quit** button and Command + Q ask for confirmation; **Cancel** keeps the

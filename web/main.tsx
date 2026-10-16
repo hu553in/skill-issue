@@ -22,6 +22,8 @@ import {
   scrollPage,
 } from "./reading";
 import type { Anchor } from "./reading";
+import { AnswerSelection } from "./selection";
+import type { SelectionCommand } from "./selection";
 import {
   acknowledgment,
   decrypt,
@@ -29,6 +31,7 @@ import {
   failure,
   parseLink,
   rememberAccessLink,
+  selectAnswer,
   viewerFragment,
 } from "./session";
 
@@ -65,8 +68,10 @@ const App = () => {
   const active = useRef("");
   const readingSize = useRef(empty.fontSize);
   const command = useRef(0);
-  const selection = useRef(-1);
-  const selected = useRef<string | null>(null);
+  const selection = useRef(new AnswerSelection());
+  const sendSelection = useRef<((request: SelectionCommand) => void) | null>(
+    null
+  );
   const [selectedID, setSelectedID] = useState<string | null>(null);
   const memoryKey = useRef(`reading:${fragment.split(".")[0]}`);
   const save = useCallback(() => {
@@ -101,8 +106,8 @@ const App = () => {
     active.current = "";
     memoryKey.current = `reading:${fragment.split(".")[0]}`;
     command.current = 0;
-    selection.current = -1;
-    selected.current = null;
+    selection.current = new AnswerSelection();
+    sendSelection.current = null;
     setSelectedID(null);
     try {
       const cached = parse(
@@ -136,6 +141,10 @@ const App = () => {
     let started = Date.now();
     let lastReceived = started;
     let accessProbe: AbortController | undefined;
+    function disconnect() {
+      selection.current.disconnect();
+      sendSelection.current = null;
+    }
     async function checkAccess() {
       // Failed upgrades belong to the same interruption. Let one bounded probe
       // finish; only a restored socket or a new viewer link makes it stale.
@@ -164,6 +173,7 @@ const App = () => {
         ) {
           generation += 1;
           ended = true;
+          disconnect();
           setStatus(signInRequired);
           socket?.close();
         }
@@ -202,12 +212,14 @@ const App = () => {
         );
         socket = ws;
         let queue = Promise.resolve();
+        let sending = Promise.resolve();
         let client = "";
         let first = true;
         ws.addEventListener("open", () => {
           accessProbe?.abort();
           generation += 1;
           queue = Promise.resolve();
+          sending = Promise.resolve();
           client = "";
           first = true;
           lastReceived = Date.now();
@@ -227,6 +239,7 @@ const App = () => {
             if (packet?.type === "ended") {
               // Close the transport while retaining final snapshots already in the queue.
               ended = true;
+              disconnect();
               setStatus("Session ended");
               ws.close();
               return;
@@ -234,6 +247,7 @@ const App = () => {
           } catch {
             generation += 1;
             ended = true;
+            disconnect();
             setStatus(failure);
             ws.close();
             return;
@@ -248,6 +262,35 @@ const App = () => {
               }
               if (packet.type === "ready") {
                 ({ client } = packet);
+                sendSelection.current = (request) => {
+                  const current = () =>
+                    !disposed &&
+                    !ended &&
+                    run === generation &&
+                    ws.readyState === WebSocket.OPEN &&
+                    selection.current.publisher === request.publisher;
+                  // Encryption is asynchronous; retain the order of rapid taps.
+                  sending = sending
+                    .then(async () => {
+                      if (!current()) {
+                        return;
+                      }
+                      const message = await selectAnswer(
+                        key,
+                        room,
+                        client,
+                        request
+                      );
+                      if (current()) {
+                        ws.send(message);
+                      }
+                    })
+                    .catch(() => {
+                      if (current()) {
+                        ws.reconnect();
+                      }
+                    });
+                };
                 established = true;
                 if (!ended && ws.readyState === WebSocket.OPEN) {
                   setStatus("Connected");
@@ -255,6 +298,7 @@ const App = () => {
                 return;
               }
               if (packet.type === "offline") {
+                selection.current.disconnect();
                 if (!ended && ws.readyState === WebSocket.OPEN) {
                   setStatus("Mac disconnected");
                 }
@@ -267,18 +311,29 @@ const App = () => {
               if (seq < highest) {
                 return;
               }
-              const next = await decrypt(key, room, packet);
+              const snapshot = await decrypt(key, room, packet);
               if (disposed || run !== generation) {
                 return;
               }
-              const reconnect = first;
+              const publisher =
+                !ended && snapshot.live ? packet.publisher : null;
+              const reconnect =
+                first || publisher !== selection.current.publisher;
               first = false;
               highest = seq;
               save();
+              selection.current.receive(snapshot, publisher, client);
+              setSelectedID(selection.current.selectedID);
               await new Promise<void>((resolve) => {
                 setUpdate({
                   applied: (appliedCommand) => {
-                    if (disposed || ended || run !== generation) {
+                    if (
+                      disposed ||
+                      ended ||
+                      run !== generation ||
+                      selection.current.selectedID !==
+                        (snapshot.selectedID ?? null)
+                    ) {
                       resolve();
                       return;
                     }
@@ -299,7 +354,7 @@ const App = () => {
                     resolve();
                   },
                   reconnect,
-                  state: next,
+                  state: snapshot,
                 });
               });
               if (
@@ -308,13 +363,18 @@ const App = () => {
                 run === generation &&
                 ws.readyState === WebSocket.OPEN
               ) {
-                setStatus(next.live ? "Listening" : "Connected");
+                if (packet.publisher === null) {
+                  setStatus("Mac disconnected");
+                } else {
+                  setStatus(snapshot.live ? "Listening" : "Connected");
+                }
               }
             })
             .catch(() => {
               if (!disposed && !ended && run === generation) {
                 generation += 1;
                 ended = true;
+                disconnect();
                 setStatus(failure);
                 ws.close();
               }
@@ -325,6 +385,7 @@ const App = () => {
             return;
           }
           generation += 1;
+          disconnect();
           if (event.code === 1008) {
             ended = true;
             setStatus(failure);
@@ -340,6 +401,7 @@ const App = () => {
       } catch {
         if (!disposed) {
           ended = true;
+          disconnect();
           setStatus(failure);
         }
       }
@@ -359,6 +421,7 @@ const App = () => {
           // establishment without assuming why it failed or admitting a socket.
           generation += 1;
           ended = true;
+          disconnect();
           setStatus(failure);
           socket?.close();
         }
@@ -376,6 +439,7 @@ const App = () => {
     document.addEventListener("visibilitychange", visibility);
     return () => {
       disposed = true;
+      disconnect();
       accessProbe?.abort();
       clearInterval(watchdog);
       document.removeEventListener("visibilitychange", visibility);
@@ -384,14 +448,6 @@ const App = () => {
   }, [fragment, save]);
   useLayoutEffect(() => {
     if (state === empty) {
-      return;
-    }
-    if (state.selection >= selection.current) {
-      selection.current = state.selection;
-      selected.current = state.selectedID ?? null;
-    }
-    if (selectedID !== selected.current) {
-      setSelectedID(selected.current);
       return;
     }
     const element = pane.current;
@@ -409,6 +465,7 @@ const App = () => {
       command.current = state.command.id;
       if (
         !update.reconnect &&
+        selection.current.publisher !== null &&
         element &&
         state.command.answerID === selectedID
       ) {
@@ -418,6 +475,14 @@ const App = () => {
     save();
     update.applied(command.current);
   }, [update, state, selectedID, save]);
+  const navigate = (direction: -1 | 1) => {
+    save();
+    const request = selection.current.move(state.answers, direction);
+    setSelectedID(selection.current.selectedID);
+    if (request) {
+      sendSelection.current?.(request);
+    }
+  };
   useEffect(() => {
     let disposed = false;
     let lock: WakeLockSentinel | undefined;
@@ -530,7 +595,31 @@ const App = () => {
   return (
     <main className="viewer" style={readingStyle}>
       <div className="meta">
-        <span className="position">{answerPosition}</span>
+        <nav className="navigation" aria-label="Answer history">
+          <button
+            type="button"
+            aria-label="Previous answer"
+            disabled={index <= 0}
+            onClick={() => {
+              navigate(-1);
+            }}
+          >
+            ←
+          </button>
+          <span className="position" aria-live="polite" aria-atomic="true">
+            {answerPosition}
+          </span>
+          <button
+            type="button"
+            aria-label="Next answer"
+            disabled={index === -1 || index >= state.answers.length - 1}
+            onClick={() => {
+              navigate(1);
+            }}
+          >
+            →
+          </button>
+        </nav>
         <output className="status">
           <i className={listening ? "live" : ""} />
           {shownStatus}
