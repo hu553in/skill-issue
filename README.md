@@ -9,8 +9,16 @@ main display as context. Read answers on your phone and control the encrypted vi
 Skill Issue is opinionated and simple, with few controls and predictable defaults to keep it **easy
 to use under interview stress**.
 
-[Install](#install) | [Viewer endpoint](#viewer-endpoint) | [Usage](#usage) |
-[Recovery](#recovery) | [Data and privacy](#data-and-privacy) | [Development](#development)
+<p align="center">
+  <a href="assets/screenshots/overview.svg"><img src="assets/screenshots/overview.svg" alt="Skill Issue settings on macOS alongside the phone viewer showing a sample answer about database indexes" width="100%"></a>
+</p>
+
+<p align="center"><em>macOS settings and the phone viewer. Demo account and sample answer.</em></p>
+
+<p align="center">
+  <a href="#install">Install</a> | <a href="#viewer-endpoint">Viewer endpoint</a> | <a href="#usage">Usage</a> |
+  <a href="#recovery">Recovery</a> | <a href="#data-and-privacy">Data and privacy</a> | <a href="#development">Development</a>
+</p>
 
 ## Install
 
