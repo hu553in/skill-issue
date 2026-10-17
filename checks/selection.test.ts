@@ -6,7 +6,12 @@ import { empty } from "../web/session";
 
 const state: ViewState = {
   ...empty,
-  answers: ["a", "b", "c"].map((id) => ({ id, status: "complete", text: id })),
+  answers: ["a", "b", "c"].map((id) => ({
+    id,
+    language: "English",
+    status: "complete",
+    text: id,
+  })),
   live: true,
   selectedID: "c",
   selection: 3,

@@ -6,6 +6,7 @@ struct SettingsControls: View {
     let canGoBack: Bool
     let canGoForward: Bool
     let fontSize: Int
+    let canChangeTextSize: Bool
     let modifiers: ShortcutModifiers
     let canChangeModifiers: Bool
     let changeModifiersHelp: String
@@ -17,8 +18,8 @@ struct SettingsControls: View {
 
     var body: some View {
         GroupBox {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .firstTextBaseline, spacing: 12) {
+            VStack(alignment: .leading, spacing: SettingsLayout.spacing) {
+                HStack(alignment: .firstTextBaseline, spacing: SettingsLayout.spacing) {
                     Text("Controls").font(.headline).accessibilityAddTraits(.isHeader)
                     Spacer(minLength: 0)
                     HStack(alignment: .firstTextBaseline, spacing: 5) {
@@ -36,7 +37,7 @@ struct SettingsControls: View {
                 } else {
                     answerButton
                 }
-                HStack(spacing: 12) {
+                HStack(spacing: SettingsLayout.spacing) {
                     shortcutButton("Previous answer", key: .left, enabled: canGoBack) {
                         navigate(-1)
                     }
@@ -44,18 +45,18 @@ struct SettingsControls: View {
                         navigate(1)
                     }
                 }
-                HStack(spacing: 12) {
+                HStack(spacing: SettingsLayout.spacing) {
                     shortcutButton("Read up", key: .up, enabled: live) { scroll(-1) }
                     shortcutButton("Read down", key: .down, enabled: live) { scroll(1) }
                 }
-                HStack(spacing: 12) {
+                HStack(spacing: SettingsLayout.spacing) {
                     shortcutButton(
                         "Decrease text size", key: .minus,
-                        enabled: live && fontSize > fontSizeRange.lowerBound
+                        enabled: canChangeTextSize && fontSize > fontSizeRange.lowerBound
                     ) { zoom(-1) }
                     shortcutButton(
                         "Increase text size", key: .plus,
-                        enabled: live && fontSize < fontSizeRange.upperBound
+                        enabled: canChangeTextSize && fontSize < fontSizeRange.upperBound
                     ) { zoom(1) }
                 }
             }.frame(maxWidth: .infinity, alignment: .leading)
@@ -76,12 +77,14 @@ struct SettingsControls: View {
         }
         .disabled(!enabled)
         // The tooltip doubles as the accessibility hint, so it keeps the shortcut while live.
-        .help(live ? key.hint(modifiers) : "Start a session first.")
+        .help(
+            live || key == .minus || key == .plus ? key.hint(modifiers) : "Start a session first."
+        )
         .accessibilityLabel(title)
     }
 
     private func shortcutLabel(_ title: String, key: ShortcutKey) -> some View {
-        HStack(spacing: 12) {
+        HStack(spacing: SettingsLayout.spacing) {
             Text(title)
             Spacer(minLength: 8)
             ShortcutHint(key: key).opacity(0.75).accessibilityHidden(true)
@@ -91,7 +94,7 @@ struct SettingsControls: View {
 
 private struct ControlsGroupBoxStyle: GroupBoxStyle {
     func makeBody(configuration: Configuration) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: SettingsLayout.spacing) {
             configuration.label
             configuration.content
         }

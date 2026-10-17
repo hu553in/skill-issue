@@ -172,8 +172,8 @@ reading on a phone. The default `http://127.0.0.1:8787` works only on the Mac an
 
 ### Keyboard shortcuts
 
-Hold **Control + Option + Command** for all commands. To use other modifier keys, stop the session
-and choose **Change…** next to **Controls**. Pick at least two keys; the choice survives app
+Hold **Control + Option + Command** for all commands. To use other modifier keys, choose **Change…**
+next to **Controls**, including during a session. Pick at least two keys; the choice survives app
 restarts and updates every shortcut hint, including the viewer.
 
 | Key   | Action                                                       |
@@ -195,17 +195,35 @@ connection returns, the viewer follows the Mac's current selection; offline taps
 - **Request again:** Space cancels the current generation and captures fresh context. Its partial
   answer stays in history. Holding Space does not repeat requests.
 - **Text size:** starts at 20, changes by 2 from 16 to 40, and survives app restarts. The +/= key
-  also accepts an extra Shift when Shift is not part of your chosen modifiers.
+  also accepts an extra Shift when Shift is not part of your chosen modifiers. You can also change
+  text size before starting a session.
 - **Hide the icon:** H hides the app's icon; macOS capture indicators remain visible. Reopen the app
   to show Settings when the icon is hidden.
+- Global shortcuts pause while you edit text or use a configuration dialog in Skill Issue. They
+  resume when you finish editing or switch to another app, so text selection and copying work
+  normally.
 
 ### Settings
 
-- **Model and Reasoning effort** load after ChatGPT sign-in. You can change them between requests.
-  Both stay disabled while choices load or an answer is being prepared or generated.
-- **Microphone, Answer language, Viewer endpoint and Cloudflare Access** are locked during sessions
-  and operations.
-- **Answer language** defaults to English and is independent of speech recognition.
+- **Model, Reasoning effort and Answer language** apply to the next answer request. You can change
+  them during a session, including while an answer is being prepared or generated. Model and effort
+  stay disabled while their choices load. Each request keeps the values it started with, and older
+  answers keep their language.
+- **Microphone, Viewer endpoint and Cloudflare Access** are locked while a session starts, runs or
+  stops. Unrelated account and model loading does not lock these settings.
+- **Answer language** defaults to English and is independent of speech recognition. Microphone and
+  language choices are saved as soon as you select them.
+- **Answer settings…** opens verbosity, preferred coding language, interview context and custom
+  instructions. Verbosity defaults to Medium; the text fields start empty. A task's required coding
+  language takes priority over your preference. Verbosity is unavailable for models that do not
+  support it.
+- **Save** applies answer settings to the next request, including during a session. **Cancel**
+  discards the draft. These settings survive restarts; changing or clearing them preserves history.
+- **Show system prompt** opens the app's bundled `prompt.md` in a separate read-only window. You can
+  select and copy the text. This shows the base prompt before language and personal settings are
+  added to a request.
+- **Cancel** can stop waiting for browser sign-in or plan permission, or cancel session startup.
+  Account changes are unavailable during a session and while another account operation runs.
 
 <details>
 <summary>Model defaults and saved choices</summary>
@@ -371,8 +389,8 @@ login.
 - Turning **Use Cloudflare Access** off keeps the credentials but stops sending them. It does not
   remove the protection in Cloudflare. The app never falls back to unprotected requests
   automatically.
-- Access settings are locked during sessions and operations. For local development, leave Access
-  off; HTTP is accepted only for loopback addresses.
+- Access settings are locked while a session starts, runs or stops. For local development, leave
+  Access off; HTTP is accepted only for loopback addresses.
 
 ## Recovery
 
@@ -414,12 +432,17 @@ errors, see [Access recovery](#access-recovery).
   window.
 - Model files are cached in `~/Library/Application Support/Skill Issue/Models/`.
 - ChatGPT tokens, verified account registrations and Access service credentials stay in Keychain.
+- Answer settings are saved in this Mac's application preferences. Clear their text fields and save
+  to remove the saved context and instructions.
 
 ### Sent to OpenAI
 
-The app sends chronological transcripts, screenshots and earlier AI suggestions directly to OpenAI.
-Each answer request adds a screenshot and the latest transcripts. Reading an old answer does not
-change that context.
+The app sends chronological transcripts, screenshots, earlier AI suggestions and your current answer
+settings directly to OpenAI. Each answer request adds a screenshot and the latest transcripts.
+Reading an old answer does not change that context.
+
+Changed or cleared answer settings replace the previous settings on the next request. Earlier AI
+answers remain in session history and may still refer to that earlier context.
 
 Requests use your ChatGPT subscription with `store: false`. Model availability and limits depend on
 [Sign in with ChatGPT](https://developers.openai.com/siwc/token-sharing-open-source).
@@ -528,8 +551,11 @@ rendering can change with macOS, Chromium or desktop appearance settings.
 ### Prompt evaluations
 
 Sign in through the app, enable ChatGPT plan usage, then quit the app and keep it closed during the
-run. The evaluator uses that selected saved account and its model settings, including token refresh.
-It consumes the account's usage without starting a session, audio capture, or screen capture.
+run. The evaluator uses that selected saved account and its model/effort settings, including token
+refresh. Answer settings come only from the synthetic cases: omitted settings mean Medium verbosity
+and three empty text fields. It never reads your saved coding preference, interview context or
+custom instructions. It consumes the account's usage without starting a session, audio capture or
+screen capture.
 
 ```sh
 bun eval:prompts --list
@@ -544,11 +570,12 @@ bun eval:prompts --prompt before=git:HEAD~1:native/Resources/prompt.md \
   --prompt after=native/Resources/prompt.md --case memory-followup,sql-multipart --repeat 2
 ```
 
-Each run saves exact prompts, inputs, settings, answers, timing, token usage when available, and a
+Each run saves base prompts, inputs, settings, answers, timing, token usage when available, and a
 blinded model comparison under `.build/prompt-evals/`. Read `report.md` alongside `manifest.json`
 and `results.jsonl`. Model grades need human review; generated code is not automatically executed.
-Fixed inputs make comparisons repeatable, but model outputs can vary. On failure, completed results
-remain available and requests are not retried automatically. Existing output directories are never
+All variants use the current app request builder, including its output-language instructions. Fixed
+inputs make comparisons repeatable, but model outputs can vary. On failure, completed results remain
+available and requests are not retried automatically. Existing output directories are never
 overwritten.
 
 Use `--models` to see the saved account's available models and `--help` for model, effort, output,

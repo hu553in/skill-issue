@@ -5,6 +5,7 @@ const sequence = v.pipe(v.number(), v.safeInteger(), v.minValue(1));
 const encoded = v.pipe(v.string(), v.regex(/^[A-Za-z0-9+/]+=*$/u));
 const answer = v.object({
   id: v.string(),
+  language: v.string(),
   status: v.picklist(["generating", "complete", "incomplete", "failed"]),
   text: v.string(),
 });
@@ -19,13 +20,12 @@ export const ViewStateSchema = v.object({
   command: v.nullish(command),
   error: v.string(),
   fontSize: v.pipe(v.number(), v.finite(), v.minValue(16), v.maxValue(40)),
-  language: v.string(),
   live: v.boolean(),
   modifiers: v.string(),
   selectedID: v.nullish(v.string()),
   selection: v.pipe(v.number(), v.safeInteger(), v.minValue(0)),
   selectionRequest: v.nullish(v.object({ client: v.string(), id: sequence })),
-  version: v.literal(2),
+  version: v.literal(3),
 });
 export type ViewState = v.InferOutput<typeof ViewStateSchema>;
 

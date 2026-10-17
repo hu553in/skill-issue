@@ -118,6 +118,7 @@ private final class RecoveryShortcuts {
     var registered: [ShortcutModifiers] = []
     var unregistered = 0
     var taken: ShortcutModifiers?
+    var active: ShortcutModifiers?
     var registry: ShortcutRegistry {
         ShortcutRegistry(
             register: { [self] modifiers in
@@ -125,8 +126,12 @@ private final class RecoveryShortcuts {
                     throw AppFailure.shortcutUnavailable("\(modifiers.symbols) + Space")
                 }
                 registered.append(modifiers)
+                active = modifiers
             },
-            unregister: { [self] in unregistered += 1 })
+            unregister: { [self] in
+                unregistered += 1
+                active = nil
+            })
     }
 }
 
@@ -301,7 +306,7 @@ struct ModelRecoveryTests {
         let model = configuredModel(session: http, storage: stored.storage)
         try await loaded(model)
         model.state.live = true
-        model.state.beginAnswer(id: "saved-answer")
+        model.state.beginAnswer(id: "saved-answer", language: "English")
         model.state.answers[0].text = "A useful existing answer"
         model.state.answers[0].status = "complete"
         #expect(model.status == "Listening")
@@ -325,7 +330,7 @@ struct ModelRecoveryTests {
         let model = configuredModel(session: http, storage: stored.storage)
         try await loaded(model)
         model.state.live = true
-        model.state.beginAnswer(id: "saved-answer")
+        model.state.beginAnswer(id: "saved-answer", language: "English")
         model.state.answers[0].text = "Partial answer"
         let body = Data("{\"error\":{\"code\":\"subscription_sharing_usage_unavailable\"}}".utf8)
         model.showError(ChatGPTFailure(status: 503, body: body))
@@ -336,14 +341,14 @@ struct ModelRecoveryTests {
         await model.shutdown()
     }
 
-    @Test func liveModelSelectionIsAvailableBetweenRequestsOnly() async throws {
+    @Test func livePreferencesCanChangeWithoutChangingGeneratingOrOlderAnswers() async throws {
         let stored = RecoveryAccountStore(session: tokens())
         let http = session(code: "models")
         defer { http.invalidateAndCancel() }
         let model = configuredModel(session: http, storage: stored.storage)
         try await loaded(model)
         model.state.live = true
-        model.state.beginAnswer(id: "existing")
+        model.state.beginAnswer(id: "existing", language: "English")
         model.state.answers[0].text = "An existing answer"
         model.state.answers[0].status = "complete"
         let selection = model.state.selection
@@ -354,15 +359,137 @@ struct ModelRecoveryTests {
         #expect(model.modelSlug == "gpt-6-sol" && model.reasoningEffort == "low")
         #expect(model.state.live && model.state.selection == selection)
         #expect(model.state.answers[0].text == "An existing answer")
-        model.state.beginAnswer(id: "generating")
+        model.state.beginAnswer(id: "generating", language: "English")
         model.state.select(-1)
         #expect(model.state.selectedID == "existing" && model.status == "Thinking…")
-        #expect(!model.canSelectModel && !model.canSelectEffort)
+        let retained = model.state
+        #expect(model.canSelectModel && model.canSelectEffort)
         model.selectModel("gpt-6-luna")
-        #expect(model.modelSlug == "gpt-6-sol")
+        model.selectEffort("high")
+        model.selectLanguage("Russian")
+        model.saveAnswerSettings(AnswerSettings(verbosity: .low, codingLanguage: "Python"))
+        #expect(model.modelSlug == "gpt-6-luna" && model.reasoningEffort == "high")
+        #expect(model.language == "Russian" && model.answerSettings.codingLanguage == "Python")
+        #expect(model.state == retained)
         model.state.answers[1].status = "failed"
         #expect(model.canSelectModel)
         #expect(model.status == "Listening")
+        await model.shutdown()
+    }
+
+    @Test func localPreferencesPersistWithoutStartingAndSessionResourcesStayFixed() async throws {
+        let defaults = TestDefaults()
+        let stored = RecoveryAccountStore(session: tokens())
+        let http = session(code: "models")
+        defer { http.invalidateAndCancel() }
+        let model = configuredModel(session: http, storage: stored.storage, defaults: defaults)
+        #expect(model.working && model.canConfigureSession && model.canEditPreferences)
+        model.selectMicrophone("test-microphone")
+        model.selectLanguage("Russian")
+        model.zoom(1)
+        #expect(defaults.string(forKey: "microphone") == "test-microphone")
+        #expect(defaults.string(forKey: "language") == "Russian")
+        #expect(defaults.integer(forKey: "fontSize") == 22)
+        try await loaded(model)
+        let endpoint = model.relayURL
+        model.state.live = true
+        model.selectMicrophone("replacement")
+        model.setViewerEndpoint("https://replacement.example.invalid")
+        #expect(model.microphone == "test-microphone" && model.relayURL == endpoint)
+        #expect(defaults.string(forKey: "microphone") == "test-microphone")
+        await model.shutdown()
+        let retained = model.state
+        model.selectLanguage("English")
+        model.selectMicrophone("replacement")
+        model.setViewerEndpoint("https://replacement.example.invalid")
+        model.saveAnswerSettings(AnswerSettings(customInstructions: "Must not save while quitting"))
+        model.configureAnswerSettings()
+        model.zoom(1)
+        #expect(!model.canEditPreferences && !model.canConfigureSession)
+        #expect(model.language == "Russian" && model.answerSettings == AnswerSettings())
+        #expect(!model.configuringAnswerSettings && model.state == retained)
+        let restored = configuredModel(session: http, storage: stored.storage, defaults: defaults)
+        try await loaded(restored)
+        #expect(restored.microphone == "test-microphone" && restored.language == "Russian")
+        #expect(restored.state.fontSize == 22)
+        await restored.shutdown()
+    }
+
+    @Test func editingSuspendsRegistrationsAndReportsAConflictWhenResuming() async throws {
+        let shortcuts = RecoveryShortcuts()
+        let http = session(code: "models")
+        defer { http.invalidateAndCancel() }
+        let model = configuredModel(
+            session: http, storage: RecoveryAccountStore(session: tokens()).storage,
+            shortcuts: shortcuts.registry)
+        try await loaded(model)
+        model.state.live = true
+        model.registerShortcuts()
+        #expect(shortcuts.active == .standard)
+        model.setShortcutsSuspended(true)
+        model.setShortcutsSuspended(true)
+        #expect(model.shortcutsSuspended && shortcuts.active == nil && shortcuts.unregistered == 1)
+        try model.saveShortcutModifiers([.control, .shift])
+        #expect(shortcuts.active == nil && model.shortcutModifiers == [.control, .shift])
+        shortcuts.taken = [.control, .shift]
+        model.setShortcutsSuspended(false)
+        #expect(shortcuts.active == nil && !model.shortcutError.isEmpty)
+        model.setShortcutsSuspended(true)
+        shortcuts.taken = nil
+        model.setShortcutsSuspended(false)
+        #expect(shortcuts.active == [.control, .shift] && model.shortcutError.isEmpty)
+        await model.shutdown()
+        model.setShortcutsSuspended(false)
+        #expect(shortcuts.active == nil && model.shortcutsSuspended)
+    }
+
+    @Test func startupCanBeCancelledBeforeAnyCapturePreparation() async throws {
+        let http = session(code: "models")
+        defer { http.invalidateAndCancel() }
+        let model = configuredModel(
+            session: http, storage: RecoveryAccountStore(session: tokens()).storage)
+        try await loaded(model)
+        try #require(model.canStartSession)
+        model.startSession()
+        #expect(model.working && !model.canConfigureSession && model.canCancelOperation)
+        #expect(model.cancelOperationTitle == "Cancel startup" && model.canSelectModel)
+        model.selectLanguage("Russian")
+        // Cancel before yielding: no capture or speech preparation can have started.
+        model.cancelOperation()
+        try await loaded(model)
+        #expect(!model.state.live && model.canConfigureSession && !model.canCancelOperation)
+        #expect(model.error.isEmpty && model.language == "Russian")
+        await model.shutdown()
+    }
+
+    @Test(arguments: [false, true])
+    func browserAuthorizationCanBeCancelledWithoutChangingSavedAccount(consent: Bool) async throws {
+        let stored = RecoveryAccountStore(session: consent ? tokens(plan: false) : nil)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        let original = try encoder.encode(stored.current)
+        let defaults = TestDefaults()
+        let http = session(code: "models")
+        defer { http.invalidateAndCancel() }
+        var opened = false
+        let model = Model(
+            chatGPT: ChatGPT(
+                session: http, storage: stored.storage, defaults: defaults,
+                openAuthorization: { _ in
+                    opened = true
+                    return true
+                }), defaults: defaults)
+        try await loaded(model)
+        if consent { model.enablePlanUsage() } else { model.authenticate() }
+        let deadline = ContinuousClock.now + .seconds(3)
+        while !opened && model.working && ContinuousClock.now < deadline { await Task.yield() }
+        try #require(opened && model.canCancelOperation && model.working)
+        #expect(model.canConfigureSession && model.canEditPreferences && !model.canAuthenticate)
+        model.cancelOperation()
+        try await loaded(model)
+        #expect(model.error.isEmpty && stored.writeCount == 0)
+        #expect(try encoder.encode(stored.current) == original)
+        #expect(!model.canCancelOperation && model.canAuthenticate)
         await model.shutdown()
     }
 
@@ -452,7 +579,7 @@ struct ModelRecoveryTests {
             session: http, storage: RecoveryAccountStore(session: tokens()).storage,
             defaults: defaults)
         try await loaded(model)
-        model.relayURL = " HTTPS://VIEWER.EXAMPLE.INVALID:443/ "
+        model.setViewerEndpoint(" HTTPS://VIEWER.EXAMPLE.INVALID:443/ ")
         #expect(defaults.string(forKey: "relayURL") == "https://viewer.example.invalid")
         for draft in [
             "https://user:secret@viewer.example.invalid",
@@ -461,12 +588,12 @@ struct ModelRecoveryTests {
             "https://viewer.example.invalid/path",
             "",
         ] {
-            model.relayURL = draft
+            model.setViewerEndpoint(draft)
             #expect(model.relayURL == draft && model.viewerSetupWarning == .invalidEndpoint)
             #expect(!model.canStartSession && model.viewerEndpoint == nil)
             #expect(defaults.string(forKey: "relayURL") == "https://viewer.example.invalid")
         }
-        model.relayURL = "https://other.example.invalid/"
+        model.setViewerEndpoint("https://other.example.invalid/")
         #expect(defaults.string(forKey: "relayURL") == "https://other.example.invalid")
         #expect(model.canStartSession && model.viewerSetupWarning == nil)
         await model.shutdown()
@@ -561,18 +688,24 @@ struct ModelRecoveryTests {
         #expect(!model.configuringShortcuts && model.shortcutModifiers == [.control, .shift])
         #expect(model.state.modifiers == "⌃⇧" && shortcuts.registered.last == [.control, .shift])
         model.state.live = true
-        #expect(model.lockReason == "Stop the session first." && !model.canConfigureShortcuts)
+        let retained = model.state
+        #expect(model.canConfigureShortcuts)
         model.configureShortcuts()
-        #expect(!model.configuringShortcuts && shortcuts.unregistered == 0)
+        #expect(model.configuringShortcuts && shortcuts.unregistered == 0)
+        shortcuts.taken = .standard
         #expect(throws: AppFailure.self) { try model.saveShortcutModifiers(.standard) }
+        #expect(model.shortcutModifiers == [.control, .shift] && model.state == retained)
+        shortcuts.taken = nil
+        try model.saveShortcutModifiers([.option, .command])
+        #expect(model.state.live && model.state.modifiers == "⌥⌘")
         model.state.live = false
         await model.shutdown()
         #expect(shortcuts.unregistered == 1)
         let restored = configuredModel(
             session: http, storage: accountStore.storage, defaults: defaults)
         try await loaded(restored)
-        #expect(restored.shortcutModifiers == [.control, .shift])
-        #expect(restored.state.modifiers == "⌃⇧")
+        #expect(restored.shortcutModifiers == [.option, .command])
+        #expect(restored.state.modifiers == "⌥⌘")
         await restored.shutdown()
     }
 
@@ -651,14 +784,14 @@ struct ModelRecoveryTests {
             defaults: defaults, viewerAccessStorage: store.storage)
         try await loaded(model)
         #expect(model.viewerCredentials == first && model.canStartSession)
-        model.relayURL = "https://new.example.invalid"
+        model.setViewerEndpoint("https://new.example.invalid")
         #expect(model.viewerCredentials == nil && model.viewerSetupRequired)
         #expect(model.viewerAccessEnabled && !model.canStartSession)
         #expect(throws: ViewerFailure.setupRequired) { try model.saveViewerAccess(first) }
         #expect(store.savedCredentials.isEmpty && store.record(for: first.origin) == first)
-        model.relayURL = second.origin
+        model.setViewerEndpoint(second.origin)
         #expect(model.viewerCredentials == second && model.canStartSession)
-        model.relayURL = "HTTPS://FIRST.EXAMPLE.INVALID:443/"
+        model.setViewerEndpoint("HTTPS://FIRST.EXAMPLE.INVALID:443/")
         #expect(model.viewerCredentials == first && model.canStartSession)
         #expect(
             store.loadedOrigins == [
@@ -666,7 +799,7 @@ struct ModelRecoveryTests {
             ])
         model.setViewerAccessEnabled(false)
         let reads = store.loadedOrigins.count
-        model.relayURL = second.origin
+        model.setViewerEndpoint(second.origin)
         #expect(store.loadedOrigins.count == reads && model.canStartSession)
         model.setViewerAccessEnabled(true)
         #expect(model.viewerCredentials == second)
@@ -740,7 +873,8 @@ struct ModelRecoveryTests {
         await model.shutdown()
     }
 
-    @Test func accessControlsIgnoreChangesWhileWorkingOrLive() async throws {
+    @Test func accessControlsAllowAccountLoadingButFreezeUntilSessionTeardownFinishes() async throws
+    {
         let store = RecoveryViewerStore()
         let defaults = TestDefaults()
         let credentials = ViewerAccessCredentials(
@@ -755,12 +889,15 @@ struct ModelRecoveryTests {
             session: http, storage: RecoveryAccountStore(session: tokens()).storage,
             defaults: defaults, viewerAccessStorage: store.storage)
         let initialReads = store.loadedOrigins.count
-        #expect(model.working && !model.canConfigureViewer)
+        #expect(model.working && model.canConfigureViewer)
         model.setViewerAccessEnabled(false)
+        #expect(!model.viewerAccessEnabled)
+        model.setViewerAccessEnabled(true)
         model.configureViewerAccess()
-        #expect(throws: ViewerFailure.setupRequired) { try model.saveViewerAccess(credentials) }
+        #expect(model.configuringViewerAccess && model.viewerCredentials == credentials)
+        try model.saveViewerAccess(credentials)
         #expect(model.viewerAccessEnabled && !model.configuringViewerAccess)
-        #expect(store.loadedOrigins.count == initialReads && store.savedCredentials.isEmpty)
+        #expect(store.loadedOrigins.count > initialReads && store.savedCredentials == [credentials])
         try await loaded(model)
         model.state.live = true
         #expect(!model.canConfigureViewer)
@@ -768,7 +905,7 @@ struct ModelRecoveryTests {
         model.configureViewerAccess()
         #expect(throws: ViewerFailure.setupRequired) { try model.saveViewerAccess(credentials) }
         #expect(model.viewerAccessEnabled && model.viewerCredentials == credentials)
-        #expect(!model.configuringViewerAccess && store.savedCredentials.isEmpty)
+        #expect(!model.configuringViewerAccess && store.savedCredentials == [credentials])
         let ending = model.endSession()
         #expect(model.working && !model.canConfigureViewer)
         model.setViewerAccessEnabled(false)
@@ -804,7 +941,7 @@ struct ModelRecoveryTests {
         model.setViewerAccessEnabled(false)
         #expect(!model.viewerAccessEnabled && model.viewerSetupRequired)
         model.setViewerAccessEnabled(true)
-        model.relayURL = "https://viewer.example.invalid"
+        model.setViewerEndpoint("https://viewer.example.invalid")
         #expect(model.viewerEndpoint?.origin == "https://viewer.example.invalid")
         model.configureViewerAccess()
         #expect(model.configuringViewerAccess && model.viewerCredentials == nil)
@@ -837,7 +974,7 @@ struct ModelRecoveryTests {
         model.setViewerAccessEnabled(false)
         #expect(!model.viewerAccessEnabled && model.viewerSetupIssue == .invalidEndpoint)
         #expect(model.viewerSetupWarning == .invalidEndpoint && !model.canStartSession)
-        model.relayURL = "https://viewer.example.invalid"
+        model.setViewerEndpoint("https://viewer.example.invalid")
         #expect(model.viewerSetupIssue == nil && model.viewerSetupWarning == nil)
         #expect(model.status == "Ready" && model.canStartSession)
         #expect(model.error.isEmpty && model.catalogError.isEmpty && model.state.error.isEmpty)
@@ -878,11 +1015,11 @@ struct ModelRecoveryTests {
         } else {
             #expect(!operationalError.isEmpty && catalogError.isEmpty)
         }
-        model.relayURL = "https://viewer.example.invalid/path"
+        model.setViewerEndpoint("https://viewer.example.invalid/path")
         #expect(model.viewerSetupIssue == .invalidEndpoint && model.viewerSetupWarning == nil)
         #expect(model.error == operationalError && model.catalogError == catalogError)
         #expect(model.state.error == stateError)
-        model.relayURL = "https://viewer.example.invalid"
+        model.setViewerEndpoint("https://viewer.example.invalid")
         #expect(model.viewerSetupIssue == .setupRequired && model.viewerSetupWarning == nil)
         #expect(model.error == operationalError && model.catalogError == catalogError)
         if kind == "viewer" {
@@ -923,7 +1060,7 @@ struct ModelRecoveryTests {
         try #require(
             model.canStartSession && stored.current?.session?.refreshToken == "rotated-refresh")
         model.state.live = true
-        model.state.beginAnswer(id: "received-answer")
+        model.state.beginAnswer(id: "received-answer", language: "English")
         model.state.answers[0].text = "A received answer that must survive"
         model.state.answers[0].status = "complete"
         let retained = model.state.answers
@@ -958,7 +1095,7 @@ struct ModelRecoveryTests {
             session: http, storage: RecoveryAccountStore(session: tokens()).storage)
         try await loaded(model)
         model.state.live = true
-        model.state.beginAnswer(id: "saved-answer")
+        model.state.beginAnswer(id: "saved-answer", language: "English")
         model.state.answers[0].text = "Keep this answer"
         model.state.answers[0].status = "complete"
         model.answer()
@@ -1013,7 +1150,7 @@ struct ModelRecoveryTests {
             session: http, storage: RecoveryAccountStore(session: tokens()).storage)
         try await loaded(model)
         model.state.live = true
-        model.state.beginAnswer(id: "saved")
+        model.state.beginAnswer(id: "saved", language: "English")
         model.state.answers[0].text = "Existing answer"
         model.state.answers[0].status = "complete"
         let retained = model.state.answers

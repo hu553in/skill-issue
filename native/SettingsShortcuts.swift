@@ -18,7 +18,7 @@ struct ShortcutModifiersConfiguration: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: SettingsLayout.sectionSpacing) {
             Text("Shortcut modifiers").font(.title2.weight(.semibold))
                 .accessibilityAddTraits(.isHeader)
             Text("Press and release at least two modifier keys.").font(.subheadline)
@@ -33,7 +33,7 @@ struct ShortcutModifiersConfiguration: View {
             LabeledContent("Modifier keys") {
                 ModifierRecorder(modifiers: $modifiers)
             }.accessibilityElement(children: .contain)
-            HStack(spacing: 12) {
+            HStack(spacing: SettingsLayout.spacing) {
                 Button("Restore default") { modifiers = .standard }
                     .disabled(modifiers == .standard)
                 Spacer(minLength: 0)
@@ -43,7 +43,7 @@ struct ShortcutModifiersConfiguration: View {
                     .help(modifiers.isValid ? "" : "Press at least two modifier keys first.")
             }
         }
-        .padding(26).frame(width: 468)
+        .padding(SettingsLayout.windowPadding).frame(width: SettingsLayout.sheetWidth)
         .onChange(of: modifiers) { error = "" }
         .onChange(of: message) { _, message in
             guard !message.isEmpty else { return }
@@ -102,7 +102,7 @@ private struct ModifierRecorder: View {
     private var shown: ShortcutModifiers { recording.peak.isEmpty ? modifiers : recording.peak }
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: SettingsLayout.compactSpacing) {
             if shown.isEmpty {
                 Text("Press modifier keys")
                     .foregroundStyle(Color(nsColor: SettingsColors.secondaryText))
@@ -121,11 +121,7 @@ private struct ModifierRecorder: View {
             }
         }
         .padding(.horizontal, 7).frame(height: 24)
-        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
-        .overlay {
-            RoundedRectangle(cornerRadius: 6)
-                .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1)
-        }
+        .settingsFieldBackground()
         .contentShape(Rectangle())
         .onTapGesture { focused = true }
         .focusable(interactions: .edit).focused($focused)

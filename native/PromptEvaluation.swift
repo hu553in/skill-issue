@@ -77,7 +77,13 @@
                 "type": "ready", "model": selected.slug,
                 "effort": selected.slug == savedModel && selected.supportsEffort(savedEffort)
                     ? savedEffort : selected.defaultEffort,
-                "models": models.map { ["slug": $0.slug, "efforts": $0.efforts] as [String: Any] },
+                "models": models.map {
+                    [
+                        "slug": $0.slug, "efforts": $0.efforts,
+                        "supportsVerbosity": $0.supportsVerbosity,
+                    ]
+                        as [String: Any]
+                },
             ])
             while let line = readLine() {
                 try Task.checkCancellation()
@@ -99,11 +105,17 @@
                 let model = models.first(where: { $0.slug == slug }),
                 let effort = request["effort"] as? String, model.supportsEffort(effort)
             else { throw AppFailure.failed }
+            guard let fields = request["settings"] as? [String: Any] else {
+                throw AppFailure.failed
+            }
+            let settings = try JSONDecoder().decode(
+                AnswerSettings.self, from: JSONSerialization.data(withJSONObject: fields))
             let start = ContinuousClock.now
             var firstTokenMs: Double?
             var text = ""
             let usage = try await chatGPT.answer(
-                input: input, language: language, model: model, effort: effort, prompt: prompt
+                input: input, language: language, model: model, effort: effort,
+                settings: settings, prompt: prompt
             ) { chunk in
                 if !chunk.isEmpty && firstTokenMs == nil {
                     firstTokenMs = milliseconds(since: start)

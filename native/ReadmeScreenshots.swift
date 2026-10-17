@@ -137,6 +137,7 @@
             }
             let body = """
                 {"models":[{"slug":"gpt-6-luna","display_name":"GPT-6-Luna","visibility":"list",
+                "support_verbosity":true,
                 "supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"}]}]}
                 """
             let response = HTTPURLResponse(
@@ -161,6 +162,9 @@
         }
         override func bool(forKey defaultName: String) -> Bool {
             lock.withLock { values[defaultName] as? Bool ?? false }
+        }
+        override func dictionary(forKey defaultName: String) -> [String: Any]? {
+            lock.withLock { values[defaultName] as? [String: Any] }
         }
         override func set(_ value: Any?, forKey defaultName: String) {
             lock.withLock { values[defaultName] = value }

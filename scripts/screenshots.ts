@@ -226,6 +226,7 @@ async function captureViewer() {
     answers: [
       {
         id: "index-demo",
+        language: "English",
         status: "complete",
         text: await Bun.file(
           path.join(import.meta.dir, "screenshots-answer.md")

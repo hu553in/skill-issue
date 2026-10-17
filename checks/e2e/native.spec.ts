@@ -159,6 +159,7 @@ test("native relay syncs selection, zoom and scroll without conflating viewer pr
       answers: [
         {
           id: "a",
+          language: "English",
           status: "complete",
           text: "Use a hash map. Average lookup is O(1).",
         },
@@ -182,10 +183,16 @@ test("native relay syncs selection, zoom and scroll without conflating viewer pr
       answers: [
         {
           id: "a",
+          language: "English",
           status: "complete",
           text: "Use a hash map. Average lookup is O(1). A streamed conclusion.",
         },
-        { id: "b", status: "complete", text: "Use a balanced tree." },
+        {
+          id: "b",
+          language: "Russian",
+          status: "complete",
+          text: "Используйте сбалансированное дерево.",
+        },
       ],
     };
     expect(streamed.seq).toBe(2);

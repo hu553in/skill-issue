@@ -11,6 +11,13 @@ func applicationMenu() -> NSMenu {
     applicationItem.submenu = application
     menu.addItem(applicationItem)
 
+    let file = NSMenu(title: "File")
+    file.addItem(
+        withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+    let fileItem = NSMenuItem()
+    fileItem.submenu = file
+    menu.addItem(fileItem)
+
     let edit = NSMenu(title: "Edit")
     edit.addItem(withTitle: "Undo", action: NSSelectorFromString("undo:"), keyEquivalent: "z")
     let redo = edit.addItem(

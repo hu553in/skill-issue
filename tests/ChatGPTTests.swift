@@ -707,17 +707,19 @@ struct ChatGPTTests {
         try await waitUntil { !model.working }
         #expect(model.modelSlug == "other" && model.reasoningEffort == "high")
         model.state.live = true
-        model.state.beginAnswer(id: "busy-selection")
+        model.state.beginAnswer(id: "busy-selection", language: "English")
+        let retained = model.state
         model.selectModel("gpt-6-luna")
         model.selectEffort("low")
-        #expect(!model.canSelectModel && !model.canSelectEffort && !model.canStartSession)
-        #expect(model.modelSlug == "other" && model.reasoningEffort == "high")
+        #expect(model.canSelectModel && model.canSelectEffort && !model.canStartSession)
+        #expect(model.modelSlug == "gpt-6-luna" && model.reasoningEffort == "low")
+        #expect(model.state == retained)
         await model.shutdown()
         let restored = Model(
             chatGPT: ChatGPT(session: session, storage: stored.storage, defaults: defaults),
             defaults: defaults)
         try await waitUntil { !restored.working }
-        #expect(restored.modelSlug == "other" && restored.reasoningEffort == "high")
+        #expect(restored.modelSlug == "gpt-6-luna" && restored.reasoningEffort == "low")
         server.setCatalog([catalogModel("other", efforts: ["medium", "low"])])
         restored.retryModels()
         try await waitUntil { !restored.working }
@@ -1027,7 +1029,7 @@ struct ChatGPTTests {
         try await waitUntil { !model.working }
         try #require(model.canStartSession)
         model.state.live = true
-        model.state.beginAnswer(id: "retained")
+        model.state.beginAnswer(id: "retained", language: "English")
         model.state.answers[0].text = "Keep this answer while shutting down"
         model.state.answers[0].status = "complete"
         let answers = model.state.answers
@@ -1179,7 +1181,7 @@ struct ChatGPTTests {
         server.finishRefresh(expiresIn: 30)
         try await waitUntil { !model.working }
         model.state.live = live
-        model.state.beginAnswer(id: "retained-answer")
+        model.state.beginAnswer(id: "retained-answer", language: "English")
         model.state.answers[0].text = "Retained answer"
         model.state.answers[0].status = "complete"
         let retained = model.state.answers
@@ -1358,11 +1360,75 @@ struct ChatGPTTests {
             #expect(server.requests.count == 1)
             #expect(
                 request["instructions"] as? String
-                    == "Evaluation variant\nTrusted session setting: output language is Russian.")
+                    == "Evaluation variant\nTrusted session setting: output language is Russian. "
+                    + "Use this language for all your prose, including headings, even when candidate settings "
+                    + "or observations request another prose language. Preserve code identifiers and explicitly "
+                    + "requested foreign-language text.")
             #expect(request["store"] as? Bool == false && request["stream"] as? Bool == true)
             #expect((request["input"] as? [[String: String]])?.first?["content"] == "Question")
             #expect((request["reasoning"] as? [String: String])?["effort"] == "low")
         }
+    }
+
+    @Test func answerSettingsUseModelCapabilityAndKeepUserTextOutOfInstructions() async throws {
+        for support in [true, false] {
+            for verbosity in AnswerVerbosity.allCases {
+                let server = TestHTTP(output: .text)
+                let session = MockHTTPProtocol.session(server: server)
+                defer { session.invalidateAndCancel() }
+                let chatGPT = try await configuredChatGPT(session: session)
+                var fields = catalogModel("gpt-6-luna")
+                fields["support_verbosity"] = support
+                fields["default_verbosity"] = "low"
+                let model = try ChatGPTModel(fields: fields)
+                let settings = AnswerSettings(
+                    verbosity: verbosity, codingLanguage: "Java 8",
+                    interviewContext: "Context \"with quotes\"\nand line breaks",
+                    customInstructions: "Start with a hint, then show the code.")
+                try await chatGPT.answer(
+                    input: [["role": "user", "content": "Current observation"]],
+                    language: "English",
+                    model: model, effort: "low", settings: settings, prompt: "Application prompt"
+                ) { _ in }
+                let body = try #require(server.requests.first)
+                #expect(
+                    body["instructions"] as? String
+                        == "Application prompt\nTrusted session setting: output language is English. "
+                        + "Use this language for all your prose, including headings, even when candidate settings "
+                        + "or observations request another prose language. Preserve code identifiers and explicitly "
+                        + "requested foreign-language text."
+                )
+                let text = body["text"] as? [String: String]
+                #expect(text?["verbosity"] == (support ? verbosity.rawValue : nil))
+                let input = try #require(body["input"] as? [[String: Any]])
+                #expect(input.count == 2)
+                #expect(input[1]["role"] as? String == "user")
+                #expect(input[0]["content"] as? String == "Current observation")
+                let content = try #require(input[1]["content"] as? [[String: String]])
+                let configuration = try #require(content.first?["text"])
+                #expect(configuration.contains("Java 8"))
+                #expect(configuration.contains("Start with a hint, then show the code."))
+                #expect((body["reasoning"] as? [String: String])?["effort"] == "low")
+            }
+        }
+        let server = TestHTTP(output: .text)
+        let session = MockHTTPProtocol.session(server: server)
+        defer { session.invalidateAndCancel() }
+        let chatGPT = try await configuredChatGPT(session: session)
+        var fields = catalogModel("gpt-6-luna")
+        fields["support_verbosity"] = true
+        fields["default_verbosity"] = "low"
+        try await chatGPT.answer(
+            input: [], language: "English", model: try ChatGPTModel(fields: fields), effort: "low"
+        ) { _ in }
+        #expect((server.requests.first?["text"] as? [String: String])?["verbosity"] == "medium")
+    }
+
+    @Test func verbosityCapabilityHandlesMissingAndInvalidCatalogMetadata() throws {
+        #expect(try !ChatGPTModel(fields: catalogModel("legacy")).supportsVerbosity)
+        var fields = catalogModel("broken")
+        fields["support_verbosity"] = "true"
+        #expect(throws: AppFailure.self) { try ChatGPTModel(fields: fields) }
     }
 
     @Test func unfinishedAndFailedEventStreamsRejectCompletionWithoutReplay() async throws {
@@ -1566,7 +1632,7 @@ struct ChatGPTTests {
         try await waitUntil { !model.working }
         try #require(model.canStartSession)
         model.state.live = true
-        model.state.beginAnswer(id: "saved")
+        model.state.beginAnswer(id: "saved", language: "English")
         model.state.answers[0].text = "Keep this answer"
         model.state.answers[0].status = "complete"
         let pending = Task { try await client.listModels() }
@@ -1598,7 +1664,7 @@ struct ChatGPTTests {
         try await waitUntil { !model.working }
         try #require(model.canStartSession)
         model.state.live = true
-        model.state.beginAnswer(id: "saved")
+        model.state.beginAnswer(id: "saved", language: "English")
         model.state.answers[0].text = "Keep this answer"
         model.state.answers[0].status = "complete"
         let retained = model.state.answers
@@ -1645,7 +1711,7 @@ struct ChatGPTTests {
             try await waitUntil { !model.working }
             try #require(model.canStartSession)
             model.state.live = true
-            model.state.beginAnswer(id: "saved")
+            model.state.beginAnswer(id: "saved", language: "English")
             model.state.answers[0].text = "Keep this answer"
             model.state.answers[0].status = "complete"
             let retained = model.state.answers
@@ -1697,7 +1763,7 @@ struct ChatGPTTests {
         try await waitUntil { !model.working }
         try #require(model.canStartSession)
         model.state.live = true
-        model.state.beginAnswer(id: "saved")
+        model.state.beginAnswer(id: "saved", language: "English")
         model.state.answers[0].text = "Keep this answer"
         model.state.answers[0].status = "complete"
         let retained = model.state.answers

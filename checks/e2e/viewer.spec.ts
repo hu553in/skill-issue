@@ -54,6 +54,7 @@ const navigationState: ViewState = {
   ...empty,
   answers: ["a", "b", "c"].map((id) => ({
     id,
+    language: "English",
     status: "complete",
     text: `# Answer ${id}\n\n${"A paragraph to read.\n\n".repeat(70)}`,
   })),
@@ -616,7 +617,7 @@ test("a lost established connection stops retrying a retired room without losing
   ).join("\n\n");
   const state: ViewState = {
     ...empty,
-    answers: [{ id: "a", status: "complete", text }],
+    answers: [{ id: "a", language: "English", status: "complete", text }],
     canAnswer: true,
     live: true,
     selectedID: "a",
@@ -742,7 +743,7 @@ for (const deniedStatus of [302, 401, 403]) {
     ).join("\n\n");
     await relay.publish({
       ...empty,
-      answers: [{ id: "a", status: "complete", text }],
+      answers: [{ id: "a", language: "English", status: "complete", text }],
       canAnswer: true,
       live: true,
       selectedID: "a",
@@ -833,6 +834,7 @@ for (const viewport of [
         answers: [
           {
             id: "a",
+            language: "English",
             status: "incomplete",
             text: Array.from(
               { length: 100 },
@@ -948,7 +950,7 @@ test("explicit Access sign-in restores the private fragment when login returns w
   ).join("\n\n");
   await relay.publish({
     ...empty,
-    answers: [{ id: "saved", status: "complete", text }],
+    answers: [{ id: "saved", language: "English", status: "complete", text }],
     live: true,
     selectedID: "saved",
   });
@@ -993,7 +995,14 @@ test("pending Access sign-in never overrides a fresh viewer link and malformed f
   const url = await relay.viewerURL();
   await relay.publish({
     ...empty,
-    answers: [{ id: "fresh", status: "complete", text: "The fresh session." }],
+    answers: [
+      {
+        id: "fresh",
+        language: "English",
+        status: "complete",
+        text: "The fresh session.",
+      },
+    ],
     live: true,
     selectedID: "fresh",
   });
@@ -1275,7 +1284,7 @@ test("a stale Access probe cannot replace a restored connection or a new viewer 
   await expect(page.getByRole("link", { name: "Sign in" })).toHaveCount(0);
 });
 
-test("generation status follows the active request while older answers remain readable", async ({
+test("generation and language follow each request while older answers remain readable", async ({
   page,
   relay,
 }) => {
@@ -1289,6 +1298,7 @@ test("generation status follows the active request while older answers remain re
   });
   const older: AnswerCard = {
     id: "older",
+    language: "English",
     status: "complete",
     text: `# Previous answer\n\n${Array.from(
       { length: 60 },
@@ -1308,6 +1318,7 @@ test("generation status follows the active request while older answers remain re
   await page.goto(await relay.viewerURL());
   const pane = page.getByRole("region", { exact: true, name: "Answer" });
   await expect(page.getByRole("status")).toHaveText("Listening");
+  await expect(pane.locator("article")).toHaveAttribute("lang", "en");
   await pane.evaluate((element) => {
     element.scrollTop = 1400;
     element.dispatchEvent(new Event("scroll"));
@@ -1316,13 +1327,19 @@ test("generation status follows the active request while older answers remain re
   if (!anchor) {
     throw new Error("The previous answer has no visible reading anchor");
   }
-  const next: AnswerCard = { id: "next", status: "generating", text: "" };
+  const next: AnswerCard = {
+    id: "next",
+    language: "Russian",
+    status: "generating",
+    text: "",
+  };
   const generating: ViewState = { ...state, answers: [older, next] };
   await relay.publish(generating);
   await expect(page.getByRole("status")).toHaveText("Thinking…");
   await expect(page.locator(".position")).toHaveText("1 / 2");
   await expect(pane.locator("article")).toHaveAttribute("aria-busy", "false");
   await expect(pane.locator("article")).toContainText("Previous answer");
+  await expect(pane.locator("article")).toHaveAttribute("lang", "en");
   expect(await visibleAnchor(pane)).toEqual(anchor);
 
   await relay.publish({
@@ -1331,6 +1348,7 @@ test("generation status follows the active request while older answers remain re
   });
   await expect(page.getByRole("status")).toHaveText("Listening");
   await expect(pane.locator("article")).toContainText("Previous answer");
+  await expect(pane.locator("article")).toHaveAttribute("lang", "en");
   expect(await visibleAnchor(pane)).toEqual(anchor);
 
   await relay.publish({ ...generating, selectedID: "next", selection: 2 });
@@ -1339,6 +1357,7 @@ test("generation status follows the active request while older answers remain re
     pane.getByRole("heading", { name: "Preparing your answer…" })
   ).toBeVisible();
   await expect(pane.locator("article")).toHaveAttribute("aria-busy", "true");
+  await expect(pane.locator("article")).toHaveAttribute("lang", "ru");
   const [first] = sockets;
   if (!first) {
     throw new Error("The viewer did not open its WebSocket");
@@ -1356,6 +1375,7 @@ test("generation status follows the active request while older answers remain re
   }
   await expect(page.getByRole("status")).toHaveText("Thinking…");
   await expect(pane.locator("article")).toHaveAttribute("aria-busy", "true");
+  await expect(pane.locator("article")).toHaveAttribute("lang", "ru");
   await relay.writer.close();
   await expect(page.getByRole("status")).toHaveText("Mac disconnected");
   await expect(
@@ -1370,6 +1390,10 @@ test("generation status follows the active request while older answers remain re
     pane.getByRole("heading", { name: "Session ended." })
   ).toBeVisible();
   await expect(pane.locator("article")).toHaveAttribute("aria-busy", "false");
+  await expect(pane.locator("article")).toHaveAttribute("lang", "ru");
+  await page.getByRole("button", { name: "Previous answer" }).click();
+  await expect(pane.locator("article")).toContainText("Previous answer");
+  await expect(pane.locator("article")).toHaveAttribute("lang", "en");
 });
 
 test("encrypted answers render Markdown safely and expose session status", async ({
@@ -1380,6 +1404,7 @@ test("encrypted answers render Markdown safely and expose session status", async
   page.on("pageerror", (error) => errors.push(error));
   const answer: AnswerCard = {
     id: "answer",
+    language: "English",
     status: "generating",
     text: "# A useful answer\n\n- Outer point\n  - Nested point\n\n```python\ndef lookup(values):\n    return values['key']\n```\n\n[Documentation](https://example.com)\n\n<script>window.injected = true</script>",
   };
@@ -1472,6 +1497,7 @@ for (const appearance of [
     ].join("\n");
     const answer: AnswerCard = {
       id: "code",
+      language: "English",
       status: "generating",
       text: `# Code answer\n\n\`\`\`python\n${source}`,
     };
@@ -1560,7 +1586,12 @@ for (const appearance of [
       ...state,
       answers: [
         ...state.answers,
-        { id: "other", status: "complete", text: "Another answer." },
+        {
+          id: "other",
+          language: "English",
+          status: "complete",
+          text: "Another answer.",
+        },
       ],
       selectedID: "other",
       selection: 2,
@@ -1598,11 +1629,13 @@ test("scrolling, history, reconnect and session switching preserve separate read
   ).join("");
   const firstAnswer: AnswerCard = {
     id: "first",
+    language: "English",
     status: "generating",
     text: `# First answer\n\n${paragraphs}`,
   };
   const secondAnswer: AnswerCard = {
     id: "second",
+    language: "English",
     status: "complete",
     text: "# Second answer\n\nUse a balanced tree.",
   };
@@ -1839,7 +1872,14 @@ test("reconnect uses authenticated upgrades and cannot deliver an old connection
   });
   await relay.publish({
     ...empty,
-    answers: [{ id: "a", status: "complete", text: "A retained answer" }],
+    answers: [
+      {
+        id: "a",
+        language: "English",
+        status: "complete",
+        text: "A retained answer",
+      },
+    ],
     live: true,
     selectedID: "a",
   });
@@ -1918,7 +1958,12 @@ test("encrypted replay works without the new native browser base64 APIs", async 
   await relay.publish({
     ...empty,
     answers: [
-      { id: "a", status: "complete", text: "Portable encrypted answer" },
+      {
+        id: "a",
+        language: "English",
+        status: "complete",
+        text: "Portable encrypted answer",
+      },
     ],
     live: true,
     selectedID: "a",
@@ -1964,7 +2009,12 @@ test("a foreground viewer replaces a silent connection and receives the latest e
   await relay.publish({
     ...empty,
     answers: [
-      { id: "a", status: "complete", text: "Latest replay after silence" },
+      {
+        id: "a",
+        language: "English",
+        status: "complete",
+        text: "Latest replay after silence",
+      },
     ],
     live: true,
     selectedID: "a",
@@ -2011,7 +2061,14 @@ for (const answerStatus of ["complete", "generating"] as const) {
     });
     await relay.publish({
       ...empty,
-      answers: [{ id: "a", status: answerStatus, text: "Late snapshot" }],
+      answers: [
+        {
+          id: "a",
+          language: "English",
+          status: answerStatus,
+          text: "Late snapshot",
+        },
+      ],
       selectedID: "a",
     });
     await page.clock.install();
@@ -2077,6 +2134,7 @@ test("unrecognized messages are ignored but recognized malformed packets and pol
     answers: [
       {
         id: "a",
+        language: "English",
         status: "complete",
         text: `## Still connected\n\n${Array.from(
           { length: 30 },
@@ -2122,7 +2180,9 @@ test("unrecognized messages are ignored but recognized malformed packets and pol
   }
   await relay.publish({
     ...empty,
-    answers: [{ id: "pending", status: "generating", text: "" }],
+    answers: [
+      { id: "pending", language: "English", status: "generating", text: "" },
+    ],
     live: true,
     selectedID: "pending",
     selection: 1,
@@ -2201,6 +2261,7 @@ test("failed answers retain scoped recovery guidance after a later request clear
 }) => {
   const failed = {
     id: "failed",
+    language: "English",
     status: "failed" as const,
     text: "Partial earlier answer.",
   };
@@ -2222,7 +2283,12 @@ test("failed answers retain scoped recovery guidance after a later request clear
     ...state,
     answers: [
       failed,
-      { id: "next", status: "complete", text: "New successful answer." },
+      {
+        id: "next",
+        language: "English",
+        status: "complete",
+        text: "New successful answer.",
+      },
     ],
     error: "",
     selectedID: "next",
@@ -2254,9 +2320,19 @@ test("failed answers retain scoped recovery guidance after a later request clear
 
 for (const card of [
   undefined,
-  { id: "retained", status: "incomplete", text: "A partial answer." },
-  { id: "retained", status: "complete", text: "A complete answer." },
-  { id: "retained", status: "failed", text: "" },
+  {
+    id: "retained",
+    language: "English",
+    status: "incomplete",
+    text: "A partial answer.",
+  },
+  {
+    id: "retained",
+    language: "English",
+    status: "complete",
+    text: "A complete answer.",
+  },
+  { id: "retained", language: "English", status: "failed", text: "" },
 ] as const) {
   test(`session end gives one recovery instruction (${card?.status ?? "empty"} answer)`, async ({
     page,
@@ -2315,7 +2391,9 @@ test("recovery changes keep partial answers, anchors and scrolling usable", asyn
   ).join("\n\n");
   const state: ViewState = {
     ...empty,
-    answers: [{ id: "retained", status: "incomplete", text }],
+    answers: [
+      { id: "retained", language: "English", status: "incomplete", text },
+    ],
     canAnswer: true,
     live: true,
     selectedID: "retained",
@@ -2403,6 +2481,7 @@ for (const [name, cache] of [
       answers: [
         {
           id: "answer",
+          language: "English",
           status: "complete",
           text: `# Cache fallback\n\n${paragraphs}`,
         },

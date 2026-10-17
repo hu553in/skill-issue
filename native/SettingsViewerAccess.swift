@@ -24,7 +24,7 @@ struct ViewerAccessConfiguration: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: SettingsLayout.sectionSpacing) {
             Text("Cloudflare Access").font(.title2.weight(.semibold))
                 .accessibilityAddTraits(.isHeader)
             Text(origin).font(.subheadline)
@@ -36,14 +36,14 @@ struct ViewerAccessConfiguration: View {
                     actionDisabled: false, action: {}, retryModels: nil,
                     retryModelsDisabled: true, detailsExpanded: .constant(false))
             }
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: SettingsLayout.spacing) {
                 LabeledContent("Client ID") {
                     TextField("", text: $clientID).textFieldStyle(.roundedBorder)
                         .focused($focused, equals: .clientID)
                         .accessibilityLabel("Client ID")
                 }
                 LabeledContent("Client secret") {
-                    HStack(spacing: 8) {
+                    HStack(spacing: SettingsLayout.compactSpacing) {
                         if secretVisible {
                             TextField("", text: $clientSecret).textFieldStyle(.roundedBorder)
                                 .focused($focused, equals: .visibleSecret)
@@ -75,7 +75,7 @@ struct ViewerAccessConfiguration: View {
                 "Use a service token for this Mac and an email policy for browser sign-in. Credentials stay in Keychain."
             ).font(.callout).foregroundStyle(Color(nsColor: SettingsColors.secondaryText))
                 .fixedSize(horizontal: false, vertical: true)
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: SettingsLayout.compactSpacing) {
                 SettingsLink(
                     title: "Read the setup guide",
                     destination: URL(
@@ -96,13 +96,13 @@ struct ViewerAccessConfiguration: View {
                     )!
                 )
             }.frame(maxWidth: .infinity, alignment: .leading)
-            HStack(spacing: 12) {
+            HStack(spacing: SettingsLayout.spacing) {
                 Spacer(minLength: 0)
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("Save", action: saveCredentials).keyboardShortcut(.defaultAction)
             }
         }
-        .padding(26).frame(width: 468)
+        .padding(SettingsLayout.windowPadding).frame(width: SettingsLayout.sheetWidth)
         .onAppear { focused = .clientID }
         .onChange(of: error) { _, message in
             guard !message.isEmpty else { return }

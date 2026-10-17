@@ -61,11 +61,11 @@ struct SettingsHeader: View {
     }
 
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            HStack(spacing: 8) {
+        HStack(alignment: .center, spacing: SettingsLayout.spacing) {
+            HStack(spacing: SettingsLayout.compactSpacing) {
                 Image(systemName: "tortoise.fill").font(.title2)
                     .accessibilityHidden(true)
-                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                HStack(alignment: .firstTextBaseline, spacing: SettingsLayout.spacing) {
                     Text("Skill Issue").font(.title2.weight(.semibold))
                         .accessibilityAddTraits(.isHeader)
                     #if !README_SCREENSHOTS
@@ -106,14 +106,14 @@ struct SettingsNotice: View {
     var disabledHelp = ""
 
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
+        HStack(alignment: .center, spacing: SettingsLayout.spacing) {
             Image(
                 systemName: warning
                     ? "exclamationmark.triangle.fill" : "exclamationmark.circle.fill"
             )
             .foregroundStyle(warning ? .orange : Color(nsColor: SettingsColors.destructive))
             .font(.body).accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: SettingsLayout.compactSpacing) {
                 ForEach(messages, id: \.self) {
                     Text($0).font(.callout).foregroundStyle(.primary)
                         .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
@@ -127,7 +127,7 @@ struct SettingsNotice: View {
                 }
             }.frame(maxWidth: .infinity, alignment: .leading)
             if actionTitle != nil || retryModels != nil {
-                VStack(spacing: 8) {
+                VStack(spacing: SettingsLayout.compactSpacing) {
                     if let actionTitle {
                         Button(actionTitle, action: action).disabled(actionDisabled)
                             .help(actionDisabled ? disabledHelp : "")

@@ -65,6 +65,7 @@ struct TranscriptSegment: Codable, Equatable, Sendable {
 }
 struct AnswerCard: Codable, Equatable, Sendable, Identifiable {
     var id: String
+    var language: String
     var text = ""
     var status = "generating"
 }
@@ -80,7 +81,7 @@ struct ViewerSelectionRequest: Codable, Equatable, Sendable {
 struct ViewState: Codable, Equatable, Sendable {
     // Codable sends this protocol version to the web viewer.
     // swiftlint:disable:next unused_declaration
-    var version = 2
+    var version = 3
     var live = false
     var canAnswer = false
     var answers: [AnswerCard] = []
@@ -89,7 +90,6 @@ struct ViewState: Codable, Equatable, Sendable {
     var selectionRequest: ViewerSelectionRequest?
     var command: ViewerCommand?
     var fontSize = 20
-    var language = "English"
     // Codable sends the shortcut reminder to the web viewer.
     var modifiers = ShortcutModifiers.standard.symbols
     var error = ""
@@ -111,8 +111,8 @@ struct ViewState: Codable, Equatable, Sendable {
         selectionRequest = request
         return true
     }
-    mutating func beginAnswer(id: String) {
-        answers.append(AnswerCard(id: id))
+    mutating func beginAnswer(id: String, language: String) {
+        answers.append(AnswerCard(id: id, language: language))
         selectedID = id
         selection += 1
         selectionRequest = nil

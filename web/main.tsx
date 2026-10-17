@@ -539,7 +539,7 @@ const App = () => {
   const card = state.answers[index];
   const hasAnswer = card !== undefined && card.text !== "";
   const answerLanguage = answerLanguages.find(
-    (language) => language.name === state.language
+    (language) => language.name === card?.language
   );
   const sessionEnded = status === "Session ended";
   const needsSignIn = status === signInRequired;

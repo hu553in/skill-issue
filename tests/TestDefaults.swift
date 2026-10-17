@@ -15,6 +15,9 @@ final class TestDefaults: UserDefaults, @unchecked Sendable {
     override func bool(forKey defaultName: String) -> Bool {
         lock.withLock { values[defaultName] as? Bool ?? false }
     }
+    override func dictionary(forKey defaultName: String) -> [String: Any]? {
+        lock.withLock { values[defaultName] as? [String: Any] }
+    }
     override func set(_ value: Any?, forKey defaultName: String) {
         lock.withLock { values[defaultName] = value }
     }

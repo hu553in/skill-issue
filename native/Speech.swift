@@ -37,6 +37,7 @@ final class SpeechEngine: @unchecked Sendable {
         var files: [String: File]
     }
     func prepare(progress: @escaping @Sendable (String) -> Void) async throws {
+        try Task.checkCancellation()
         if model != nil { return }
         let manifestURL = Bundle.module.url(
             forResource: "model", withExtension: "json", subdirectory: "Resources")!
@@ -46,6 +47,7 @@ final class SpeechEngine: @unchecked Sendable {
             .appendingPathComponent(
                 "Skill Issue/Models/\(manifest.revision)", isDirectory: true)
         for (index, path) in manifest.files.keys.sorted().enumerated() {
+            try Task.checkCancellation()
             let info = manifest.files[path]!
             let target = directory.appendingPathComponent(path)
             let existing = try? Data(contentsOf: target, options: .mappedIfSafe)
@@ -63,26 +65,33 @@ final class SpeechEngine: @unchecked Sendable {
             )!
             let (temporary, response) = try await URLSession.shared.download(from: url)
             defer { try? FileManager.default.removeItem(at: temporary) }
+            try Task.checkCancellation()
             let data = try Data(contentsOf: temporary, options: .mappedIfSafe)
             guard (response as? HTTPURLResponse)?.statusCode == 200, data.count == info.bytes,
                 SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() == info.sha256
             else { throw AppFailure.failed }
+            try Task.checkCancellation()
             try data.write(to: target, options: .atomic)
         }
+        try Task.checkCancellation()
         progress("Preparing speech…")
-        model = try await NemotronStreamingASRModel.fromLocal(
-            bundleDir: directory, computeUnits: .all)
-        try await withCheckedThrowingContinuation {
-            (continuation: CheckedContinuation<Void, Error>) in
-            queue.async { [self] in
-                do {
-                    try autoreleasepool { try model!.warmUp() }
-                    continuation.resume()
-                } catch {
-                    model = nil
-                    continuation.resume(throwing: error)
+        do {
+            model = try await NemotronStreamingASRModel.fromLocal(
+                bundleDir: directory, computeUnits: .all)
+            try Task.checkCancellation()
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<Void, Error>) in
+                queue.async { [self] in
+                    do {
+                        try autoreleasepool { try model!.warmUp() }
+                        continuation.resume()
+                    } catch { continuation.resume(throwing: error) }
                 }
             }
+            try Task.checkCancellation()
+        } catch {
+            model = nil
+            throw error
         }
     }
     func start(failed: @escaping @Sendable () -> Void) async throws {

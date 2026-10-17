@@ -565,7 +565,11 @@ private func selectionMessage(
     let reader = "00000000-0000-0000-0000-000000000003"
     let otherReader = "00000000-0000-0000-0000-000000000004"
     var state = ViewState(
-        live: true, answers: [AnswerCard(id: "a"), AnswerCard(id: "b"), AnswerCard(id: "c")],
+        live: true,
+        answers: [
+            AnswerCard(id: "a", language: "English"), AnswerCard(id: "b", language: "English"),
+            AnswerCard(id: "c", language: "English"),
+        ],
         selectedID: "c")
     var applied: [Int] = []
     relay.onSelection = { answerID, request in
@@ -689,7 +693,7 @@ private func selectionMessage(
     let relay = try await Relay.create(url: base)
     var state = ViewState(
         live: true,
-        answers: [AnswerCard(id: "a", text: "initial")],
+        answers: [AnswerCard(id: "a", language: "English", text: "initial")],
         selectedID: "a")
     // Keep the burst in one actor turn so coalescing does not depend on TCP buffer sizes.
     for index in 1...25 {
@@ -716,7 +720,8 @@ private func selectionMessage(
     server.drainPublications()
     let relay = try await Relay.create(url: base)
     var state = ViewState(
-        live: true, answers: [AnswerCard(id: "a", text: "initial")], selectedID: "a")
+        live: true, answers: [AnswerCard(id: "a", language: "English", text: "initial")],
+        selectedID: "a")
     try relay.publish(state)
     for _ in 1...6 {
         state.scroll(1)
@@ -763,7 +768,9 @@ private func selectionMessage(
     defer { monitor.cancel() }
     var state = ViewState(
         live: true,
-        answers: [AnswerCard(id: "a", text: String(repeating: "x", count: 2_000_000))],
+        answers: [
+            AnswerCard(id: "a", language: "English", text: String(repeating: "x", count: 2_000_000))
+        ],
         selectedID: "a")
     server.readPublicationPrefix()
     try relay.publish(state)

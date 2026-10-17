@@ -425,7 +425,7 @@ struct OAuthTests {
             try await loaded(model)
             try #require(model.canStartSession && fixture.modelRequests == 1)
             model.state.live = true
-            model.state.beginAnswer(id: "retained")
+            model.state.beginAnswer(id: "retained", language: "English")
             model.state.answers[0].text = "Keep this received answer"
             model.state.answers[0].status = "complete"
             let answers = model.state.answers
@@ -565,7 +565,7 @@ struct OAuthTests {
         try await loaded(model)
         #expect(model.canStartSession && fixture.modelRequests == 1)
         model.state.live = true
-        model.state.beginAnswer(id: "saved-answer")
+        model.state.beginAnswer(id: "saved-answer", language: "English")
         model.state.answers[0].text = "A useful existing answer"
         model.state.answers[0].status = "complete"
         let answers = model.state.answers
@@ -653,7 +653,7 @@ struct OAuthTests {
         try await loaded(model)
         try #require(model.canStartSession)
         model.state.live = true
-        model.state.beginAnswer(id: "retained")
+        model.state.beginAnswer(id: "retained", language: "English")
         model.state.answers[0].text = "Keep this received answer"
         model.state.answers[0].status = "complete"
         let answers = model.state.answers

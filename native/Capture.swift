@@ -25,7 +25,10 @@ final class Capture {
         microphone: String,
         failed: @escaping @MainActor @Sendable () -> Void
     ) async throws {
-        guard await AVCaptureDevice.requestAccess(for: .audio) else {
+        try Task.checkCancellation()
+        let microphoneAllowed = await AVCaptureDevice.requestAccess(for: .audio)
+        try Task.checkCancellation()
+        guard microphoneAllowed else {
             throw AppFailure.microphonePermission
         }
         guard CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess() else {
@@ -33,6 +36,7 @@ final class Capture {
         }
         let content = try await SCShareableContent.excludingDesktopWindows(
             false, onScreenWindowsOnly: true)
+        try Task.checkCancellation()
         guard
             let display = content.displays.first(where: { $0.displayID == CGMainDisplayID() })
                 ?? content.displays.first
@@ -45,8 +49,9 @@ final class Capture {
             display: display, excludingApplications: own, exceptingWindows: [])
         self.filter = filter
         origin = CMTimeGetSeconds(CMClockGetTime(CMClockGetHostTimeClock()))
-        try await speech.start(failed: { Task { @MainActor in failed() } })
         do {
+            try await speech.start(failed: { Task { @MainActor in failed() } })
+            try Task.checkCancellation()
             let sink = AudioSink(speech: speech, origin: origin, failed: failed)
             self.sink = sink
             let config = SCStreamConfiguration()
@@ -64,6 +69,7 @@ final class Capture {
             try stream.addStreamOutput(sink, type: .audio, sampleHandlerQueue: sink.queue)
             try stream.addStreamOutput(sink, type: .microphone, sampleHandlerQueue: sink.queue)
             try await stream.startCapture()
+            try Task.checkCancellation()
             captureLog.notice("Live capture started")
         } catch {
             await stop()

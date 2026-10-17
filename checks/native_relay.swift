@@ -71,7 +71,8 @@ import JOSESwift
             live: true,
             answers: [
                 AnswerCard(
-                    id: "a", text: "Use a hash map. Average lookup is O(1).", status: "complete")
+                    id: "a", language: "English", text: "Use a hash map. Average lookup is O(1).",
+                    status: "complete")
             ],
             selectedID: "a",
             command: ViewerCommand(id: 3, answerID: "a", direction: 1)
@@ -102,7 +103,9 @@ import JOSESwift
         var before = connectionCounts.count
         state.answers[0].text += " A streamed conclusion."
         state.answers.append(
-            AnswerCard(id: "b", text: "Use a balanced tree.", status: "complete"))
+            AnswerCard(
+                id: "b", language: "Russian", text: "Используйте сбалансированное дерево.",
+                status: "complete"))
         try relay.publish(state)
         let (streamed, streamedState) = try await snapshot(socket, room: parts[0], key: keyData)
         guard streamed.seq == 2, streamedState == state, appliedCount == 1 else {

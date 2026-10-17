@@ -1,6 +1,7 @@
 import AVFoundation
 import AppKit
 import Carbon
+import Combine
 import CoreImage.CIFilterBuiltins
 import SwiftUI
 
@@ -20,7 +21,7 @@ private struct AnswerLanguage: Decodable, Sendable {
 
 @MainActor
 final class Model: ObservableObject {
-    @Published var relayURL: String {
+    @Published private(set) var relayURL: String {
         didSet {
             guard relayURL != oldValue else { return }
             // Invalid drafts can contain pasted credentials or private session fragments.
@@ -34,9 +35,12 @@ final class Model: ObservableObject {
     @Published var configuringViewerAccess = false
     @Published private(set) var shortcutModifiers: ShortcutModifiers
     @Published private(set) var shortcutError = ""
+    private(set) var shortcutsSuspended = false
     @Published var configuringShortcuts = false
-    @Published var microphone: String
-    @Published var language: String
+    @Published private(set) var microphone: String
+    @Published private(set) var language: String
+    @Published private(set) var answerSettings: AnswerSettings
+    @Published var configuringAnswerSettings = false
     @Published private(set) var models: [ChatGPTModel] = []
     @Published private(set) var modelSlug = ""
     @Published private(set) var reasoningEffort = ""
@@ -107,7 +111,7 @@ final class Model: ObservableObject {
     private var startTask: Task<Void, Never>?
     private var endingTask: Task<Void, Never>?
     private var settingsTask: Task<Void, Never>?
-    @Published private var terminating = false
+    @Published private(set) var terminating = false
     private var captureFailure: UUID?
     private var canUseChatGPT: Bool {
         !account.isEmpty && chatGPT.canUsePlan && !chatGPT.requiresSignIn
@@ -126,8 +130,30 @@ final class Model: ObservableObject {
     var canChooseAccount: Bool { canAuthenticate && account.isEmpty }
     var selectedModel: ChatGPTModel? { models.first { $0.slug == modelSlug } }
     var answering: Bool { state.answers.contains { $0.status == "generating" } }
-    var canSelectModel: Bool { !working && !answering && !models.isEmpty }
+    var canEditPreferences: Bool { !terminating }
+    var canSelectModel: Bool { canEditPreferences && !loadingModels && !models.isEmpty }
     var canSelectEffort: Bool { canSelectModel && !(selectedModel?.efforts.isEmpty ?? true) }
+    var canCancelOperation: Bool {
+        guard !terminating else { return false }
+        switch operation {
+        case .signingIn?, .requestingPermission?, .preparingSpeech?, .starting?: return true
+        default: return false
+        }
+    }
+    var cancelOperationTitle: String {
+        switch operation {
+        case .preparingSpeech?, .starting?: return "Cancel startup"
+        default: return "Cancel"
+        }
+    }
+    func cancelOperation() {
+        guard canCancelOperation else { return }
+        switch operation {
+        case .preparingSpeech?, .starting?: startTask?.cancel()
+        case .signingIn?, .requestingPermission?: settingsTask?.cancel()
+        default: break
+        }
+    }
     var canStartSession: Bool {
         guard !working, !state.live, canUseChatGPT,
             let model = selectedModel, !viewerSetupRequired
@@ -152,14 +178,21 @@ final class Model: ObservableObject {
         }
         return "Choose a supported reasoning effort first."
     }
-    // Explains controls that are locked while work is running or a session is live.
+    // Session resources stay fixed from startup until capture and relay have stopped.
     var lockReason: String? {
-        if working { return "Wait for the current step to finish." }
+        if terminating { return "Wait for the app to quit." }
+        if sessionTransition { return "Wait for the session transition to finish." }
         return state.live ? "Stop the session first." : nil
     }
-
-    var canConfigureViewer: Bool { !working && !state.live }
-    var canConfigureShortcuts: Bool { !working && !state.live }
+    private var sessionTransition: Bool {
+        switch operation {
+        case .preparingSpeech?, .starting?, .stopping?: return true
+        default: return false
+        }
+    }
+    var canConfigureSession: Bool { canEditPreferences && !state.live && !sessionTransition }
+    var canConfigureViewer: Bool { canConfigureSession }
+    var canConfigureShortcuts: Bool { canEditPreferences }
     var viewerEndpoint: ViewerEndpoint? { try? ViewerEndpoint(relayURL) }
     var viewerSetupIssue: ViewerFailure? {
         guard let endpoint = viewerEndpoint else { return .invalidEndpoint }
@@ -190,6 +223,7 @@ final class Model: ObservableObject {
         relayURL = defaults.string(forKey: "relayURL") ?? "http://127.0.0.1:8787"
         microphone = defaults.string(forKey: "microphone") ?? ""
         language = defaults.string(forKey: "language") ?? "English"
+        answerSettings = AnswerSettings(defaults: defaults)
         let savedFontSize = defaults.integer(forKey: "fontSize")
         if fontSizeRange.contains(savedFontSize) { state.fontSize = savedFontSize }
         state.modifiers = shortcutModifiers.symbols
@@ -208,6 +242,22 @@ final class Model: ObservableObject {
         }
         restoreAccounts()
         if viewerAccessEnabled { restoreViewerCredentials() }
+    }
+    func selectMicrophone(_ identifier: String) {
+        guard canConfigureSession else { return }
+        microphone = identifier
+        defaults.set(identifier, forKey: "microphone")
+    }
+    func selectLanguage(_ selected: String) {
+        guard canEditPreferences, AnswerLanguage.all.contains(where: { $0.name == selected }) else {
+            return
+        }
+        language = selected
+        defaults.set(selected, forKey: "language")
+    }
+    func setViewerEndpoint(_ endpoint: String) {
+        guard canConfigureViewer else { return }
+        relayURL = endpoint
     }
     func setViewerAccessEnabled(_ enabled: Bool) {
         guard canConfigureViewer else { return }
@@ -239,6 +289,16 @@ final class Model: ObservableObject {
         restoreViewerCredentials()
         configuringViewerAccess = true
     }
+    func configureAnswerSettings() {
+        guard canEditPreferences else { return }
+        configuringAnswerSettings = true
+    }
+    func saveAnswerSettings(_ settings: AnswerSettings) {
+        guard canEditPreferences else { return }
+        settings.save(to: defaults)
+        answerSettings = settings
+        configuringAnswerSettings = false
+    }
     func saveViewerAccess(_ credentials: ViewerAccessCredentials) throws {
         guard canConfigureViewer, viewerAccessEnabled,
             credentials.origin == viewerEndpoint?.origin
@@ -251,12 +311,20 @@ final class Model: ObservableObject {
         configuringViewerAccess = false
     }
     func registerShortcuts() {
+        guard !shortcutsSuspended, !terminating else { return }
         do {
             try shortcuts.register(shortcutModifiers)
-            shortcutError = ""
+            if !shortcutError.isEmpty { shortcutError = "" }
         } catch {
-            shortcutError = (error as? AppFailure)?.message ?? failureMessage
+            let message = (error as? AppFailure)?.message ?? failureMessage
+            if shortcutError != message { shortcutError = message }
         }
+    }
+    func setShortcutsSuspended(_ suspended: Bool) {
+        let suspended = suspended || terminating
+        guard suspended != shortcutsSuspended else { return }
+        shortcutsSuspended = suspended
+        if suspended { shortcuts.unregister() } else { registerShortcuts() }
     }
     func configureShortcuts() {
         guard canConfigureShortcuts else { return }
@@ -265,6 +333,7 @@ final class Model: ObservableObject {
     func saveShortcutModifiers(_ modifiers: ShortcutModifiers) throws {
         guard canConfigureShortcuts, modifiers.isValid else { throw AppFailure.failed }
         try shortcuts.register(modifiers)
+        if shortcutsSuspended { shortcuts.unregister() }
         shortcutModifiers = modifiers
         state.modifiers = modifiers.symbols
         defaults.set(modifiers.rawValue, forKey: "shortcutModifiers")
@@ -507,10 +576,7 @@ final class Model: ObservableObject {
         currentRequest = nil
         snapshotTask = nil
         captureFailure = nil
-        state = ViewState(fontSize: state.fontSize, language: language, modifiers: state.modifiers)
-        for (key, value) in [
-            "microphone": microphone, "language": language,
-        ] { defaults.set(value, forKey: key) }
+        state = ViewState(fontSize: state.fontSize, modifiers: state.modifiers)
         startTask = Task { [self] in
             defer { startTask = nil }
             do {
@@ -633,11 +699,13 @@ final class Model: ObservableObject {
     func answer() {
         guard canAnswer, let model = selectedModel else { return }
         let effort = reasoningEffort
+        let language = language
+        let settings = answerSettings
         cancelAnswer()
         let id = UUID().uuidString
         let session = sessionID
         currentRequest = id
-        state.beginAnswer(id: id)
+        state.beginAnswer(id: id, language: language)
         state.error = ""
         clearFeedback()
         let previous = snapshotTask
@@ -676,7 +744,8 @@ final class Model: ObservableObject {
                 else { throw AppFailure.failed }
                 let input = try history.input(through: id)
                 try await chatGPT.answer(
-                    input: input, language: language, model: model, effort: effort
+                    input: input, language: language, model: model, effort: effort,
+                    settings: settings
                 ) { [weak self] delta in
                     guard let self, self.sessionID == session, self.currentRequest == id,
                         let index = self.state.answers.firstIndex(where: { $0.id == id })
@@ -713,17 +782,17 @@ final class Model: ObservableObject {
         currentRequest = nil
     }
     func navigate(_ direction: Int) {
-        guard state.live else { return }
+        guard !terminating, state.live else { return }
         state.select(direction)
         publish()
     }
     func scroll(_ direction: Int) {
-        guard state.live else { return }
+        guard !terminating, state.live else { return }
         state.scroll(direction)
         publish()
     }
     func zoom(_ direction: Int) {
-        guard state.live else { return }
+        guard canEditPreferences else { return }
         let size = min(
             fontSizeRange.upperBound, max(fontSizeRange.lowerBound, state.fontSize + direction * 2))
         guard size != state.fontSize else { return }
@@ -766,7 +835,7 @@ final class Model: ObservableObject {
     func openViewer() { if let link { NSWorkspace.shared.open(link) } }
     func shutdown() async {
         terminating = true
-        shortcuts.unregister()
+        setShortcutsSuspended(true)
         settingsTask?.cancel()
         startTask?.cancel()
         await settingsTask?.value
@@ -780,6 +849,7 @@ struct SettingsView: View {
     @ObservedObject var model: Model
     @State private var detailsExpanded = false
     let toggleIcon: () -> Void
+    var showSystemPrompt: () -> Void = {}
     var maximumHeight: CGFloat?
     private var microphones: [AVCaptureDevice] {
         AVCaptureDevice.DiscoverySession(
@@ -796,7 +866,7 @@ struct SettingsView: View {
         return model.viewerSetupWarning.map { [$0.message] } ?? []
     }
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: SettingsLayout.sectionSpacing) {
             SettingsHeader(
                 status: model.status, working: model.working, live: model.state.live,
                 answering: model.answering,
@@ -825,7 +895,8 @@ struct SettingsView: View {
                     .priority: NSAccessibilityPriorityLevel.high.rawValue,
                 ])
         }
-        .padding(26).frame(width: 520).frame(maxHeight: maximumHeight)
+        .padding(SettingsLayout.windowPadding).frame(width: 520).frame(maxHeight: maximumHeight)
+        .disabled(model.terminating)
         .sheet(isPresented: $model.configuringViewerAccess) {
             ViewerAccessConfiguration(
                 origin: model.viewerEndpoint?.origin ?? "",
@@ -834,6 +905,12 @@ struct SettingsView: View {
         .sheet(isPresented: $model.configuringShortcuts) {
             ShortcutModifiersConfiguration(
                 modifiers: model.shortcutModifiers, save: model.saveShortcutModifiers)
+        }
+        .sheet(isPresented: $model.configuringAnswerSettings) {
+            AnswerSettingsConfiguration(
+                settings: model.answerSettings, model: model.selectedModel,
+                showSystemPrompt: showSystemPrompt,
+                save: model.saveAnswerSettings)
         }
         // Size the AppKit window to the content after applying the screen height limit.
         .fixedSize(horizontal: true, vertical: true)
@@ -869,11 +946,11 @@ struct SettingsView: View {
             detailsExpanded: $detailsExpanded, disabledHelp: model.lockReason ?? "")
     }
     private var settingsContent: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: SettingsLayout.sectionSpacing) {
             if !feedbackMessages.isEmpty {
                 feedbackNotice
             }
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: SettingsLayout.compactSpacing) {
                 Text("ChatGPT").font(.headline)
                 if !model.account.isEmpty {
                     Text(model.activeAccountLabel).font(.subheadline)
@@ -891,7 +968,7 @@ struct SettingsView: View {
                         Text("Another account").tag("")
                     }.disabled(!model.canChooseAccount).help(authenticationHelp)
                 }
-                HStack(spacing: 12) {
+                HStack(spacing: SettingsLayout.spacing) {
                     Button(
                         model.account.isEmpty
                             ? model.savedAccounts.isEmpty ? "Sign in with ChatGPT" : "Sign in"
@@ -902,8 +979,8 @@ struct SettingsView: View {
                     }
                 }.disabled(!model.canAuthenticate).help(authenticationHelp)
             }
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: SettingsLayout.spacing) {
+                HStack(spacing: SettingsLayout.spacing) {
                     Picker(
                         "Model",
                         selection: Binding(get: { model.modelSlug }, set: model.selectModel)
@@ -926,23 +1003,36 @@ struct SettingsView: View {
                     }.disabled(!model.canSelectEffort).help(modelHelp)
                     Spacer(minLength: 0)
                 }
-                Picker("Microphone", selection: $model.microphone) {
+                Picker(
+                    "Answer language",
+                    selection: Binding(get: { model.language }, set: model.selectLanguage)
+                ) {
+                    ForEach(AnswerLanguage.all, id: \.name) { Text($0.label).tag($0.name) }
+                }
+                Button("Answer settings…", action: model.configureAnswerSettings)
+                Text("Changes apply to the next answer request.")
+                    .font(.callout).foregroundStyle(Color(nsColor: SettingsColors.secondaryText))
+                    .padding(.bottom, SettingsLayout.compactSpacing)
+                Picker(
+                    "Microphone",
+                    selection: Binding(get: { model.microphone }, set: model.selectMicrophone)
+                ) {
                     Text("System default").tag("")
                     ForEach(microphones, id: \.uniqueID) { Text($0.localizedName).tag($0.uniqueID) }
-                }.disabled(model.working || model.state.live).help(model.lockReason ?? "")
-                Picker("Answer language", selection: $model.language) {
-                    ForEach(AnswerLanguage.all, id: \.name) { Text($0.label).tag($0.name) }
-                }.disabled(model.working || model.state.live).help(model.lockReason ?? "")
+                }.disabled(!model.canConfigureSession).help(model.lockReason ?? "")
                 LabeledContent("Viewer endpoint") {
-                    HStack(spacing: 12) {
-                        TextField("https://…", text: $model.relayURL).textFieldStyle(.roundedBorder)
+                    HStack(spacing: SettingsLayout.spacing) {
+                        TextField(
+                            "https://…",
+                            text: Binding(get: { model.relayURL }, set: model.setViewerEndpoint)
+                        ).textFieldStyle(.roundedBorder)
                             .accessibilityLabel("Viewer endpoint")
                             .disabled(!model.canConfigureViewer).help(model.lockReason ?? "")
                         SettingsLink(title: "Viewer setup", destination: AppBuild.viewerSetupURL)
                             .fixedSize()
                     }
                 }
-                HStack(spacing: 12) {
+                HStack(spacing: SettingsLayout.spacing) {
                     Toggle(
                         "Use Cloudflare Access",
                         isOn: Binding(
@@ -967,7 +1057,7 @@ struct SettingsView: View {
                         ).padding(8).background(.white).clipShape(RoundedRectangle(cornerRadius: 8))
                             .accessibilityLabel("Private viewer QR code")
                     }
-                    VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: SettingsLayout.compactSpacing) {
                         Text(model.viewerStatus).font(.headline)
                         if !model.viewerDelivery.isEmpty {
                             Text(model.viewerDelivery).font(.subheadline)
@@ -987,20 +1077,23 @@ struct SettingsView: View {
                 canGoBack: model.state.live && !model.working && answerIndex > 0,
                 canGoForward: model.state.live && !model.working
                     && answerIndex < model.state.answers.count - 1,
-                fontSize: model.state.fontSize, modifiers: model.shortcutModifiers,
+                fontSize: model.state.fontSize, canChangeTextSize: model.canEditPreferences,
+                modifiers: model.shortcutModifiers,
                 canChangeModifiers: model.canConfigureShortcuts,
-                changeModifiersHelp: model.lockReason ?? "", answer: model.answer,
+                changeModifiersHelp:
+                    "Change the shortcut modifiers without restarting the session.",
+                answer: model.answer,
                 navigate: model.navigate, scroll: model.scroll, zoom: model.zoom,
                 changeModifiers: model.configureShortcuts)
         }
     }
     private var authenticationHelp: String {
         if model.canAuthenticate { return "" }
+        if model.working { return "Wait for the current step to finish." }
         return model.lockReason ?? "Restore saved accounts first."
     }
     private var modelHelp: String {
-        if model.answering { return "Wait for the answer to finish." }
-        return model.working ? model.lockReason ?? "" : ""
+        model.loadingModels ? "Wait for available models to load." : ""
     }
     private var settingsFooter: some View {
         HStack {
@@ -1008,7 +1101,9 @@ struct SettingsView: View {
                 .foregroundStyle(.red)
             menuBarIconButton
             Spacer()
-            if model.state.live {
+            if model.canCancelOperation {
+                Button(model.cancelOperationTitle, action: model.cancelOperation)
+            } else if model.state.live {
                 sessionButton.buttonStyle(.bordered)
             } else {
                 sessionButton.buttonStyle(.borderedProminent)
@@ -1018,7 +1113,7 @@ struct SettingsView: View {
     private var menuBarIconButton: some View {
         let title = model.iconVisible ? "Hide menu bar icon" : "Show menu bar icon"
         return Button(action: toggleIcon) {
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: SettingsLayout.spacing) {
                 Text(title)
                 ShortcutHint(key: .menuBarIcon, modifiers: model.shortcutModifiers)
                     .opacity(0.75).accessibilityHidden(true)
@@ -1051,6 +1146,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let model = Model(shortcuts: .carbon())
     private var item: NSStatusItem!
     private var window: NSWindow?
+    private var systemPromptWindow: SystemPromptWindow?
+    private var settingsObservation: AnyCancellable?
+    private var configurationOpen = false
     private var held: Set<ShortcutKey> = []
     private var heldModifiers = ShortcutModifiers.standard
     private var quitPending = false
@@ -1074,6 +1172,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         item.button?.target = self
         item.button?.action = #selector(toggleSettings)
         model.registerShortcuts()
+        settingsObservation = model.$configuringViewerAccess
+            .combineLatest(model.$configuringShortcuts, model.$configuringAnswerSettings)
+            .sink { [weak self] access, shortcuts, answer in
+                self?.configurationOpen = access || shortcuts || answer
+                self?.updateShortcuts()
+            }
+        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(updateShortcuts), name: name, object: nil)
+        }
         let opaque = Unmanaged.passUnretained(self).toOpaque()
         var events = [
             EventTypeSpec(
@@ -1105,7 +1213,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     private func hotkey(_ id: UInt32, released: Bool) {
         guard globalShortcutKeys.indices.contains(Int(id) - 1) else { return }
-        if heldModifiers != model.shortcutModifiers || model.configuringShortcuts {
+        if heldModifiers != model.shortcutModifiers || model.shortcutsSuspended {
             held.removeAll()
             heldModifiers = model.shortcutModifiers
         }
@@ -1114,7 +1222,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             held.remove(key)
             return
         }
-        guard !model.configuringShortcuts else { return }
+        guard !model.shortcutsSuspended, !model.terminating, !quitPending else { return }
         if held.contains(key) && (key == .space || key == .menuBarIcon) { return }
         held.insert(key)
         switch key {
@@ -1129,6 +1237,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
     private func toggleIcon() {
+        guard model.canEditPreferences else { return }
         model.iconVisible.toggle()
         item.isVisible = model.iconVisible
     }
@@ -1141,16 +1250,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     private func showSettings() {
         if window == nil {
-            let window = NSWindow(
+            let window = ApplicationWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 520, height: 640),
                 styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
             window.title = "Settings"
             window.isReleasedWhenClosed = false
             window.delegate = self
+            window.focusChanged = { [weak self] in self?.updateShortcuts() }
             self.window = window
             window.contentView = NSHostingView(
                 rootView: SettingsView(
-                    model: model, toggleIcon: { [weak self] in self?.toggleIcon() }))
+                    model: model, toggleIcon: { [weak self] in self?.toggleIcon() },
+                    showSystemPrompt: { [weak self] in self?.showSystemPrompt() }))
             updateSettingsBounds()
             window.center()
         }
@@ -1159,6 +1270,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
+    private func showSystemPrompt() {
+        do {
+            if systemPromptWindow == nil {
+                let controller = SystemPromptWindow(prompt: try SystemPrompt.load())
+                (controller.window as? ApplicationWindow)?.focusChanged = { [weak self] in
+                    self?.updateShortcuts()
+                }
+                systemPromptWindow = controller
+            }
+            systemPromptWindow?.show()
+        } catch { model.showError(error) }
+    }
+    @objc private func updateShortcuts() {
+        let keyWindow = NSApp.keyWindow
+        let editing =
+            NSApp.isActive
+            && (configurationOpen || keyWindow?.sheetParent != nil
+                || keyWindow?.firstResponder is NSTextView)
+        let suspended = editing || quitPending || model.terminating
+        if suspended != model.shortcutsSuspended {
+            held.removeAll()
+            heldModifiers = model.shortcutModifiers
+            model.setShortcutsSuspended(suspended)
+        }
+    }
+    func applicationDidBecomeActive(_ notification: Notification) { updateShortcuts() }
+    func applicationDidResignActive(_ notification: Notification) { updateShortcuts() }
     func windowDidChangeScreen(_ notification: Notification) { updateSettingsBounds() }
     func windowDidResize(_ notification: Notification) { updateSettingsBounds() }
     @objc private func screenParametersChanged(_ notification: Notification) {
@@ -1189,6 +1327,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         showSettings()
         guard let window else { return .terminateCancel }
         quitPending = true
+        updateShortcuts()
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "Quit Skill Issue?"
@@ -1198,6 +1337,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         alert.beginSheetModal(for: window) { [self] response in
             guard response == .alertSecondButtonReturn else {
                 quitPending = false
+                updateShortcuts()
                 sender.reply(toApplicationShouldTerminate: false)
                 return
             }

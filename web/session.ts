@@ -14,11 +14,10 @@ export const empty: ViewState = {
   canAnswer: false,
   error: "",
   fontSize: 20,
-  language: "English",
   live: false,
   modifiers: "⌃⌥⌘",
   selection: 0,
-  version: 2,
+  version: 3,
 };
 export const failure = "Couldn't complete that.";
 export function parseLink(fragment: string) {

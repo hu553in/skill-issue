@@ -2,6 +2,7 @@ struct ChatGPTModel: Identifiable, Sendable {
     let slug: String
     let displayName: String
     let efforts: [String]
+    let supportsVerbosity: Bool
     var id: String { slug }
     var defaultEffort: String { efforts.contains("low") ? "low" : efforts.first ?? "" }
 
@@ -15,6 +16,12 @@ struct ChatGPTModel: Identifiable, Sendable {
         else { throw AppFailure.failed }
         self.slug = slug
         displayName = name
+        if let support = fields["support_verbosity"] {
+            guard let support = support as? Bool else { throw AppFailure.failed }
+            supportsVerbosity = support
+        } else {
+            supportsVerbosity = false
+        }
         var efforts: [String] = []
         if let levels = fields["supported_reasoning_levels"] {
             guard let levels = levels as? [[String: Any]] else { throw AppFailure.failed }

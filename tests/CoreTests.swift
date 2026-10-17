@@ -9,7 +9,10 @@ import Testing
 @Test func encryptedSnapshot() throws {
     let key = CryptoKit.SymmetricKey(size: .bits256)
     let state = ViewState(
-        live: true, answers: [AnswerCard(id: "a", text: "A private answer", status: "complete")],
+        live: true,
+        answers: [
+            AnswerCard(id: "a", language: "English", text: "A private answer", status: "complete")
+        ],
         selectedID: "a")
     let packet = try encryptedPacket(state, room: "room", sequence: 7, key: key)
     #expect(!packet.contains(state.answers[0].text))
@@ -112,8 +115,8 @@ import Testing
     #expect(text.contains("cutoff_seconds"))
     #expect(text.contains("input_image"))
     var state = ViewState(live: true)
-    state.beginAnswer(id: "a")
-    state.beginAnswer(id: "b")
+    state.beginAnswer(id: "a", language: "English")
+    state.beginAnswer(id: "b", language: "English")
     state.select(-1)
     #expect(state.selectedID == "a")
     state.select(-1)
@@ -127,12 +130,29 @@ import Testing
     #expect(state.command == ViewerCommand(id: 2, answerID: "b", direction: -1))
 }
 
+@Test func answerLanguagesStayWithTheirRequestsAcrossHistoryAndEncoding() throws {
+    var state = ViewState(live: true)
+    state.beginAnswer(id: "english", language: "English")
+    state.answers[0].text = "First answer"
+    state.answers[0].status = "complete"
+    state.beginAnswer(id: "russian", language: "Russian")
+    state.answers[1].text = "Второй ответ"
+    state.select(-1)
+    #expect(state.selectedID == "english")
+    #expect(state.answers.map(\.language) == ["English", "Russian"])
+    #expect(state.answers[1].status == "generating")
+    state.live = false
+    let restored = try JSONDecoder().decode(ViewState.self, from: JSONEncoder().encode(state))
+    #expect(restored.answers.map(\.language) == ["English", "Russian"])
+    #expect(restored.selectedID == "english")
+}
+
 @Test func viewerSelectionUsesTheSameCursorAsMacControls() {
     let request = ViewerSelectionRequest(client: "reader", id: 1)
     var state = ViewState(live: true)
-    state.beginAnswer(id: "a")
-    state.beginAnswer(id: "b")
-    state.beginAnswer(id: "c")
+    state.beginAnswer(id: "a", language: "English")
+    state.beginAnswer(id: "b", language: "English")
+    state.beginAnswer(id: "c", language: "English")
     let selected = state.select(answerID: "a", request: request)
     #expect(selected)
     #expect(state.selection == 4)
@@ -152,7 +172,7 @@ import Testing
     let selectedMissing = state.select(answerID: "missing", request: request)
     #expect(!selectedMissing)
     #expect(state == beforeInvalid)
-    state.beginAnswer(id: "d")
+    state.beginAnswer(id: "d", language: "English")
     #expect(state.selectionRequest == nil)
     #expect(state.selectedID == "d")
     state.live = false

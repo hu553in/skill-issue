@@ -2,9 +2,15 @@
 import { appendFile } from "node:fs/promises";
 import path from "node:path";
 
-import type { Answer, FrozenCase, InputMessage } from "./evaluation";
+import type {
+  Answer,
+  AnswerSettings,
+  FrozenCase,
+  InputMessage,
+} from "./evaluation";
 import {
   command,
+  defaultAnswerSettings,
   freezeCases,
   freezePrompt,
   judgeInput,
@@ -38,8 +44,9 @@ Calls consume that account's usage. No microphone, screen capture or app UI is s
   --list                         List fixtures; no build, account access or calls
   --models                       List available models; no generation calls
 
-Outputs: manifest.json, results.jsonl, report.md. Inputs and settings are frozen;
-model outputs and model judgments remain nondeterministic and need human review.
+Outputs: manifest.json, results.jsonl, report.md. Inputs and settings are frozen.
+Answer settings come only from synthetic cases, never the app's personal fields.
+Model outputs and model judgments remain nondeterministic and need human review.
 Failures stop the run without automatic retries; completed results are preserved.
 `;
 
@@ -49,6 +56,7 @@ interface Request {
   language: string;
   model: string;
   effort: string;
+  settings: AnswerSettings;
 }
 
 async function* jsonLines(stream: ReadableStream<Uint8Array>) {
@@ -298,10 +306,11 @@ async function main() {
     const effort = config.effort ?? worker.ready.effort;
     const judgeModel = config["judge-model"] ?? model;
     const judgeEffort = config["judge-effort"] ?? effort;
-    validateSettings(worker.ready, model, effort);
-    if (config["no-judge"] !== true) {
-      validateSettings(worker.ready, judgeModel, judgeEffort);
-    }
+    const generatorCapabilities = validateSettings(worker.ready, model, effort);
+    const judgeCapabilities =
+      config["no-judge"] === true
+        ? null
+        : validateSettings(worker.ready, judgeModel, judgeEffort);
     const comparisons = cases.length * config.repeat;
     const count =
       comparisons * (prompts.length + (config["no-judge"] === true ? 0 : 1));
@@ -311,23 +320,29 @@ async function main() {
         {
           cases,
           createdAt: new Date().toISOString(),
-          generator: { effort, model },
+          generator: {
+            effort,
+            model,
+            supportsVerbosity: generatorCapabilities.supportsVerbosity,
+          },
           gitSHA,
           judge:
-            config["no-judge"] === true
+            judgeCapabilities === null
               ? null
               : {
                   effort: judgeEffort,
                   model: judgeModel,
                   prompt: judgePrompt,
+                  settings: defaultAnswerSettings(),
                   sha256: sha256(judgePrompt),
+                  supportsVerbosity: judgeCapabilities.supportsVerbosity,
                 },
           order:
             "rotate variants by case index + repeat index; rotate judge candidates by one more position",
           plannedCalls: count,
           prompts,
           repeat: config.repeat,
-          version: 1,
+          version: 2,
         },
         null,
         2
@@ -369,6 +384,7 @@ async function main() {
               language: item.language,
               model,
               prompt: prompt.text,
+              settings: item.settings,
             });
             const answer = { ...response, variant: prompt.label };
             await save({ answer, caseID: item.id, repeat, type: "answer" });
@@ -388,6 +404,7 @@ async function main() {
               language: "English",
               model: judgeModel,
               prompt: judgePrompt,
+              settings: defaultAnswerSettings(),
             });
             let grade: ReturnType<typeof parseGrade>;
             try {

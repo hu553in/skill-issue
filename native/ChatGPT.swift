@@ -451,6 +451,7 @@ final class ChatGPT {
     @discardableResult
     func answer(
         input: [[String: Any]], language: String, model: ChatGPTModel, effort: String,
+        settings: AnswerSettings = AnswerSettings(),
         prompt: String? = nil,
         delta: (String) -> Void
     ) async throws -> [String: Int]? {
@@ -460,12 +461,7 @@ final class ChatGPT {
             }
             let access = try await accessToken()
             try Task.checkCancellation()
-            let prompt =
-                try prompt
-                ?? String(
-                    contentsOf: Bundle.module.url(
-                        forResource: "prompt", withExtension: "md", subdirectory: "Resources")!,
-                    encoding: .utf8)
+            let prompt = try prompt ?? SystemPrompt.load()
             var request = URLRequest(url: URL(string: "\(resource)/responses")!)
             request.httpMethod = "POST"
             request.timeoutInterval = 180
@@ -474,10 +470,14 @@ final class ChatGPT {
             var body: [String: Any] = [
                 "model": model.slug, "store": false, "stream": true,
                 "instructions": prompt
-                    + "\nTrusted session setting: output language is \(language).",
-                "input": input,
+                    + "\nTrusted session setting: output language is \(language). "
+                    + "Use this language for all your prose, including headings, even when candidate settings "
+                    + "or observations request another prose language. Preserve code identifiers and explicitly "
+                    + "requested foreign-language text.",
+                "input": try settings.input(with: input),
             ]
             if !effort.isEmpty { body["reasoning"] = ["effort": effort] }
+            if model.supportsVerbosity { body["text"] = ["verbosity": settings.verbosity.rawValue] }
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
             let (bytes, response) = try await session.bytes(for: request)
             #if DEBUG

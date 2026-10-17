@@ -104,6 +104,7 @@ test("large snapshots, replacement snapshots and per-reader acknowledgments surv
     answers: [
       {
         id: "large",
+        language: "English",
         status: "complete",
         text: "A private answer.\n".repeat(12_000),
       },
@@ -149,7 +150,12 @@ test("large snapshots, replacement snapshots and per-reader acknowledgments surv
   const small: ViewState = {
     ...state,
     answers: [
-      { id: "small", status: "complete", text: "A shorter replacement." },
+      {
+        id: "small",
+        language: "English",
+        status: "complete",
+        text: "A shorter replacement.",
+      },
     ],
     selectedID: "small",
     selection: 1,
@@ -328,6 +334,7 @@ test("unauthorized raw sockets are denied before upgrade across repeated no-clos
       answers: [
         {
           id: "replacement",
+          language: "English",
           status: "complete" as const,
           text: "A new publisher.",
         },

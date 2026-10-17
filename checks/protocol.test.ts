@@ -25,7 +25,14 @@ import { acknowledgment, decrypt, empty, parseLink } from "../web/session";
 test("decrypted snapshots reject invalid domain fields without coercion", () => {
   const valid = {
     ...empty,
-    answers: [{ id: "answer", status: "complete", text: "Answer text" }],
+    answers: [
+      {
+        id: "answer",
+        language: "English",
+        status: "complete",
+        text: "Answer text",
+      },
+    ],
     command: { answerID: null, direction: -1, id: 1 },
     selectedID: null,
   };
@@ -35,14 +42,23 @@ test("decrypted snapshots reject invalid domain fields without coercion", () => 
   );
   const invalid = [
     { version: 1 },
+    { version: 2 },
     { live: "true" },
     { canAnswer: "true" },
     { canAnswer: undefined },
     { answers: null },
     { answers: [null] },
-    { answers: [{ id: 1, status: "complete", text: "text" }] },
-    { answers: [{ id: "a", status: "done", text: "text" }] },
-    { answers: [{ id: "a", status: "complete", text: [] }] },
+    {
+      answers: [
+        { id: 1, language: "English", status: "complete", text: "text" },
+      ],
+    },
+    {
+      answers: [{ id: "a", language: "English", status: "done", text: "text" }],
+    },
+    {
+      answers: [{ id: "a", language: "English", status: "complete", text: [] }],
+    },
     { selectedID: 1 },
     { selection: -1 },
     { selection: 1.5 },
@@ -54,7 +70,10 @@ test("decrypted snapshots reject invalid domain fields without coercion", () => 
     { fontSize: 41 },
     { fontSize: "20" },
     { fontSize: Number.POSITIVE_INFINITY },
-    { language: null },
+    { answers: [{ id: "a", status: "complete", text: "text" }] },
+    {
+      answers: [{ id: "a", language: null, status: "complete", text: "text" }],
+    },
     { modifiers: 1 },
     { error: false },
     { command: false },
@@ -171,6 +190,7 @@ test("encrypted history authenticates room, sequence and version", async () => {
     answers: [
       {
         id: "a",
+        language: "English",
         status: "complete" as const,
         text: "Private code: <script>alert(1)</script>",
       },
@@ -200,7 +220,7 @@ test("encrypted history authenticates room, sequence and version", async () => {
   expect(await decrypt(key, "room", packet)).toEqual(state);
   const paddedState = packet.box.endsWith("=")
     ? state
-    : { ...state, language: "English." };
+    : { ...state, error: "." };
   const padded = packet.box.endsWith("=") ? packet : await encrypt(paddedState);
   expect(await decrypt(key, "room", padded)).toEqual(paddedState);
   const alphabet =
