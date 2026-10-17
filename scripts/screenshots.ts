@@ -19,7 +19,7 @@ await mkdir(build, { recursive: true });
 const temporary = await mkdtemp(path.join(build, "capture-"));
 const output = path.join(root, "assets/screenshots/overview.svg");
 const nativePNG = path.join(temporary, "settings.png");
-const settingsFrameSize = { height: 1680, width: 1400 };
+const settingsFrameSize = { height: 1760, width: 1400 };
 const viewerFrameSize = { height: 1840, width: 1040 };
 let child: ReturnType<typeof Bun.spawn> | undefined;
 let browser: Browser | undefined;

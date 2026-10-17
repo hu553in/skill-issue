@@ -261,6 +261,11 @@ final class Model: ObservableObject {
         captureInputs.screenshots = enabled
         captureInputs.save(to: defaults)
     }
+    func selectDisplay(_ selection: DisplaySelection) {
+        guard canConfigureSession else { return }
+        captureInputs.display = selection
+        captureInputs.save(to: defaults)
+    }
     func selectLanguage(_ selected: String) {
         guard canEditPreferences, AnswerLanguage.all.contains(where: { $0.name == selected }) else {
             return
@@ -641,7 +646,7 @@ final class Model: ObservableObject {
                     inputs: inputs,
                     failed: { [weak self] in self?.captureFailed(session: session) })
                 try Task.checkCancellation()
-                guard captureFailure != session else { throw AppFailure.failed }
+                guard captureFailure != session else { throw AppFailure.captureStopped }
                 state.live = true
                 operation = nil
                 state.canAnswer = canAnswer
@@ -728,15 +733,15 @@ final class Model: ObservableObject {
         // cancel capture finalization or discard the older observation batch.
         let frozen = capture.freeze()
         let captured = Task { () throws -> (Observation, (any Error)?) in
-            async let image = capture.screenshot()
+            async let images = capture.screenshots()
             for try await (cutoff, transcript) in frozen {
-                var screenshot: (Data, Double)?
+                var screenshots: [Screenshot] = []
                 var screenshotError: (any Error)?
-                do { screenshot = try await image } catch { screenshotError = error }
+                do { screenshots = try await images } catch { screenshotError = error }
                 return (
                     Observation(
                         requestID: id, cutoff: cutoff, transcript: transcript,
-                        screenshot: screenshot?.0, screenshotTime: screenshot?.1),
+                        screenshots: screenshots),
                     screenshotError
                 )
             }
@@ -846,7 +851,7 @@ final class Model: ObservableObject {
     private func captureFailed(session: UUID) {
         guard sessionID == session else { return }
         captureFailure = session
-        if state.live { endSession(failed: true) }
+        if state.live { endSession(failed: true, error: AppFailure.captureStopped) }
     }
     func copyLink() {
         guard let link else { return }
@@ -967,36 +972,37 @@ struct SettingsView: View {
             if !feedbackMessages.isEmpty {
                 feedbackNotice
             }
-            VStack(alignment: .leading, spacing: SettingsLayout.compactSpacing) {
-                Text("ChatGPT").font(.headline)
-                if !model.account.isEmpty {
-                    Text(model.activeAccountLabel).font(.subheadline)
-                        .foregroundStyle(Color(nsColor: SettingsColors.secondaryText))
-                } else if !model.savedAccounts.isEmpty {
-                    Picker(
-                        "Account",
-                        selection: Binding(
-                            get: { model.selectedAccountID }, set: model.selectAccount)
-                    ) {
-                        ForEach(model.savedAccounts, id: \.clientID) { saved in
-                            Text(model.accountLabel(saved)).tag(saved.clientID)
-                        }
-                        Divider()
-                        Text("Another account").tag("")
-                    }.disabled(!model.canChooseAccount).help(authenticationHelp)
-                }
-                HStack(spacing: SettingsLayout.spacing) {
-                    Button(
-                        model.account.isEmpty
-                            ? model.savedAccounts.isEmpty ? "Sign in with ChatGPT" : "Sign in"
-                            : "Sign out",
-                        action: model.authenticate)
-                    if model.needsPlanPermission {
-                        Button("Enable ChatGPT plan usage", action: model.enablePlanUsage)
-                    }
-                }.disabled(!model.canAuthenticate).help(authenticationHelp)
-            }
             VStack(alignment: .leading, spacing: SettingsLayout.spacing) {
+                VStack(alignment: .leading, spacing: SettingsLayout.compactSpacing) {
+                    Text("ChatGPT").font(.headline)
+                    if !model.account.isEmpty {
+                        Text(model.activeAccountLabel).font(.subheadline)
+                            .foregroundStyle(Color(nsColor: SettingsColors.secondaryText))
+                    } else if !model.savedAccounts.isEmpty {
+                        Picker(
+                            "Account",
+                            selection: Binding(
+                                get: { model.selectedAccountID }, set: model.selectAccount)
+                        ) {
+                            ForEach(model.savedAccounts, id: \.clientID) { saved in
+                                Text(model.accountLabel(saved)).tag(saved.clientID)
+                            }
+                            Divider()
+                            Text("Another account").tag("")
+                        }.disabled(!model.canChooseAccount).help(authenticationHelp)
+                    }
+                    HStack(spacing: SettingsLayout.spacing) {
+                        Button(
+                            model.account.isEmpty
+                                ? model.savedAccounts.isEmpty ? "Sign in with ChatGPT" : "Sign in"
+                                : "Sign out",
+                            action: model.authenticate)
+                        if model.needsPlanPermission {
+                            Button("Enable ChatGPT plan usage", action: model.enablePlanUsage)
+                        }
+                    }.disabled(!model.canAuthenticate).help(authenticationHelp)
+                }
+                Divider()
                 HStack(spacing: SettingsLayout.spacing) {
                     Picker(
                         "Model",
@@ -1020,17 +1026,21 @@ struct SettingsView: View {
                     }.disabled(!model.canSelectEffort).help(modelHelp)
                     Spacer(minLength: 0)
                 }
-                Picker(
-                    "Answer language",
-                    selection: Binding(get: { model.language }, set: model.selectLanguage)
-                ) {
-                    ForEach(AnswerLanguage.all, id: \.name) { Text($0.label).tag($0.name) }
+                HStack(spacing: SettingsLayout.spacing) {
+                    Picker(
+                        "Answer language",
+                        selection: Binding(get: { model.language }, set: model.selectLanguage)
+                    ) {
+                        ForEach(AnswerLanguage.all, id: \.name) { Text($0.label).tag($0.name) }
+                    }
+                    Button("Answer settings…", action: model.configureAnswerSettings)
+                    Spacer(minLength: 0)
                 }
-                Button("Answer settings…", action: model.configureAnswerSettings)
                 Text("Changes apply to the next answer request.")
                     .font(.callout).foregroundStyle(Color(nsColor: SettingsColors.secondaryText))
-                    .padding(.bottom, SettingsLayout.compactSpacing)
+                Divider()
                 CaptureSettingsView(model: model)
+                Divider()
                 LabeledContent("Viewer endpoint") {
                     HStack(spacing: SettingsLayout.spacing) {
                         TextField(
@@ -1061,11 +1071,12 @@ struct SettingsView: View {
                 }.disabled(!model.canConfigureViewer).help(model.lockReason ?? "")
             }
             if let link = model.link {
-                HStack(spacing: 18) {
+                HStack(spacing: SettingsLayout.sectionSpacing) {
                     if let qr = qrCode(link.absoluteString) {
                         Image(nsImage: qr).interpolation(.none).resizable().frame(
                             width: 104, height: 104
-                        ).padding(8).background(.white).clipShape(RoundedRectangle(cornerRadius: 8))
+                        ).padding(SettingsLayout.compactSpacing).background(.white)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
                             .accessibilityLabel("Private viewer QR code")
                     }
                     VStack(alignment: .leading, spacing: SettingsLayout.compactSpacing) {
@@ -1076,7 +1087,7 @@ struct SettingsView: View {
                         }
                         Text("Keep this private session link to yourself.").font(.caption)
                             .foregroundStyle(Color(nsColor: SettingsColors.secondaryText))
-                        HStack {
+                        HStack(spacing: SettingsLayout.spacing) {
                             Button("Open viewer", action: model.openViewer)
                             Button("Copy link", action: model.copyLink)
                         }
@@ -1107,7 +1118,7 @@ struct SettingsView: View {
         model.loadingModels ? "Wait for available models to load." : ""
     }
     private var settingsFooter: some View {
-        HStack {
+        HStack(spacing: SettingsLayout.spacing) {
             Button("Quit", role: .destructive) { NSApp.terminate(nil) }
                 .foregroundStyle(.red)
             menuBarIconButton

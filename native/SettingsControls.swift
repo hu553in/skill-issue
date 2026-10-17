@@ -86,7 +86,7 @@ struct SettingsControls: View {
     private func shortcutLabel(_ title: String, key: ShortcutKey) -> some View {
         HStack(spacing: SettingsLayout.spacing) {
             Text(title)
-            Spacer(minLength: 8)
+            Spacer(minLength: SettingsLayout.compactSpacing)
             ShortcutHint(key: key).opacity(0.75).accessibilityHidden(true)
         }.frame(maxWidth: .infinity)
     }
@@ -98,7 +98,7 @@ private struct ControlsGroupBoxStyle: GroupBoxStyle {
             configuration.label
             configuration.content
         }
-        .padding(12)
+        .padding(SettingsLayout.spacing)
         .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 10))
         .overlay {
             RoundedRectangle(cornerRadius: 10)

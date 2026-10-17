@@ -49,13 +49,11 @@ struct AnswerSettingsTests {
         var history = InterviewHistory()
         history.append(
             Observation(
-                requestID: "one", cutoff: 10, transcript: [], screenshot: nil,
-                screenshotTime: nil))
+                requestID: "one", cutoff: 10, transcript: []))
         history.update("one", answer: "Earlier advice", completed: true)
         history.append(
             Observation(
-                requestID: "two", cutoff: 20, transcript: [], screenshot: nil,
-                screenshotTime: nil))
+                requestID: "two", cutoff: 20, transcript: []))
         let observations = try history.input(through: "two")
         let original = try JSONSerialization.data(
             withJSONObject: observations, options: .sortedKeys)

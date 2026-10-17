@@ -37,7 +37,14 @@ function fixture(): EvalCase {
         answer: "Sort the array in place.",
         completed: false,
         cutoff: 10,
-        screenshot: "code.png",
+        screenshots: [
+          {
+            capturedAt: 10,
+            displayID: "main",
+            displayName: "Built-in display",
+            file: "code.png",
+          },
+        ],
         transcript: [
           {
             end: 8,
@@ -50,6 +57,7 @@ function fixture(): EvalCase {
       },
       {
         cutoff: 20,
+        screenshots: [],
         transcript: [
           {
             end: 19,
@@ -142,10 +150,13 @@ test("eval observations match native history fields and preserve incomplete sugg
       text: JSON.stringify({
         cutoff_seconds: 10,
         request_id: "eval-memory-follow-up-1",
-        screenshot: {
-          captured_at_seconds: 10,
-          description: "Main Mac display at this request",
-        },
+        screenshots: [
+          {
+            captured_at_seconds: 10,
+            display_id: "main",
+            display_name: "Built-in display",
+          },
+        ],
         transcript: [
           {
             end_seconds: 8,
@@ -183,7 +194,11 @@ test("eval observations match native history fields and preserve incomplete sugg
   if (!firstTurn) {
     throw new Error("Missing observation.");
   }
-  firstTurn.screenshotTime = 12;
+  const [firstImage] = firstTurn.screenshots;
+  if (!firstImage) {
+    throw new Error("Missing screenshot.");
+  }
+  firstImage.capturedAt = 12;
   const [later] = parseCases([capturedLater]);
   if (!later) {
     throw new Error("Missing case.");
@@ -197,7 +212,7 @@ test("eval observations match native history fields and preserve incomplete sugg
   }
   expect(JSON.parse(message.content[0].text)).toMatchObject({
     cutoff_seconds: 10,
-    screenshot: { captured_at_seconds: 12 },
+    screenshots: [{ captured_at_seconds: 12 }],
   });
   expect(() => buildInput(parsed, new Map())).toThrow("missing frozen image");
 });
@@ -227,11 +242,79 @@ test("fixture validation rejects leaked target answers, duplicated criteria and 
   expect(() =>
     parseCases([{ ...fixture(), criteria: ["Same", "Same"] }])
   ).toThrow("criteria must be unique");
-  const noImage = fixture();
-  noImage.observations = noImage.observations.map((turn, index) =>
-    index === 1 ? { ...turn, screenshotTime: 20 } : turn
+  const duplicateDisplay = fixture();
+  duplicateDisplay.observations = duplicateDisplay.observations.map((turn) => ({
+    ...turn,
+    screenshots: [...turn.screenshots, ...turn.screenshots],
+  }));
+  expect(() => parseCases([duplicateDisplay])).toThrow(
+    "display IDs must be unique"
   );
-  expect(() => parseCases([noImage])).toThrow("screenshotTime requires");
+});
+
+test("multiple images preserve metadata order and display identity across history", () => {
+  const item = fixture();
+  const [first, last] = item.observations;
+  if (!first || !last) {
+    throw new Error("Missing observations.");
+  }
+  first.screenshots = [
+    {
+      capturedAt: 10.2,
+      displayID: "external",
+      displayName: "Display",
+      file: "code.png",
+    },
+    {
+      capturedAt: 10.1,
+      displayID: "builtin",
+      displayName: "Display",
+      file: "task.jpg",
+    },
+  ];
+  last.screenshots = [
+    {
+      capturedAt: 20.1,
+      displayID: "builtin",
+      displayName: "Display",
+      file: "updated.jpg",
+    },
+  ];
+  const images = new Map([
+    ["code.png", "data:image/png;base64,AQ=="],
+    ["task.jpg", "data:image/jpeg;base64,Ag=="],
+    ["updated.jpg", "data:image/jpeg;base64,Aw=="],
+  ]);
+  const input = buildInput(item, images);
+  const [firstMessage, , lastMessage] = input;
+  if (
+    firstMessage?.role !== "user" ||
+    firstMessage.content[0]?.type !== "input_text" ||
+    lastMessage?.role !== "user"
+  ) {
+    throw new Error("Missing observation messages.");
+  }
+  expect(JSON.parse(firstMessage.content[0].text)).toMatchObject({
+    screenshots: [
+      {
+        captured_at_seconds: 10.2,
+        display_id: "external",
+        display_name: "Display",
+      },
+      {
+        captured_at_seconds: 10.1,
+        display_id: "builtin",
+        display_name: "Display",
+      },
+    ],
+  });
+  expect(firstMessage.content.slice(1)).toEqual([
+    { image_url: "data:image/png;base64,AQ==", type: "input_image" },
+    { image_url: "data:image/jpeg;base64,Ag==", type: "input_image" },
+  ]);
+  expect(lastMessage.content.slice(1)).toEqual([
+    { image_url: "data:image/jpeg;base64,Aw==", type: "input_image" },
+  ]);
 });
 
 test("answer settings accept arbitrary text and reject incomplete or invalid configuration", () => {
@@ -592,27 +675,66 @@ test("frozen prompt bytes are unchanged and existing output directories cannot b
   }
 });
 
-test("case snapshots freeze image bytes and reject unknown cases before requests", async () => {
+test("case snapshots freeze every image and its metadata into the case hash", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "skill-issue-eval-cases-"));
   try {
-    await Bun.write(
-      path.join(root, "evals/cases.json"),
-      JSON.stringify([fixture()])
-    );
+    const item = fixture();
+    const [firstTurn] = item.observations;
+    if (!firstTurn) {
+      throw new Error("Missing observation.");
+    }
+    firstTurn.screenshots.push({
+      capturedAt: 10.1,
+      displayID: "external",
+      displayName: "External display",
+      file: "extra.jpg",
+    });
+    const fixturePath = path.join(root, "evals/cases.json");
+    await Bun.write(fixturePath, JSON.stringify([item]));
     // Image decoding is the API's job; this boundary identifies PNG/JPEG and freezes bytes.
     await Bun.write(
       path.join(root, "evals/code.png"),
       Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])
     );
-    const cases = await freezeCases(root, []);
-    await Bun.write(path.join(root, "evals/code.png"), "changed");
-    expect(cases[0]?.input[0]).toMatchObject({
+    await Bun.write(
+      path.join(root, "evals/extra.jpg"),
+      Buffer.from([255, 216, 255, 1])
+    );
+    const [original] = await freezeCases(root, []);
+    expect(original?.input[0]).toMatchObject({
       content: [
         { type: "input_text" },
         {
           image_url: "data:image/png;base64,iVBORw0KGgo=",
           type: "input_image",
         },
+        { image_url: "data:image/jpeg;base64,/9j/AQ==", type: "input_image" },
+      ],
+    });
+    await Bun.write(
+      path.join(root, "evals/extra.jpg"),
+      Buffer.from([255, 216, 255, 2])
+    );
+    const [changedImage] = await freezeCases(root, []);
+    expect(changedImage?.sha256).not.toBe(original?.sha256);
+    firstTurn.screenshots.reverse();
+    await Bun.write(fixturePath, JSON.stringify([item]));
+    const [reordered] = await freezeCases(root, []);
+    expect(reordered?.sha256).not.toBe(changedImage?.sha256);
+    const [firstImage] = firstTurn.screenshots;
+    if (!firstImage) {
+      throw new Error("Missing screenshot.");
+    }
+    firstImage.capturedAt = 12;
+    await Bun.write(fixturePath, JSON.stringify([item]));
+    const [changedMetadata] = await freezeCases(root, []);
+    expect(changedMetadata?.sha256).not.toBe(reordered?.sha256);
+    await Bun.write(path.join(root, "evals/code.png"), "changed");
+    expect(original?.input[0]).toMatchObject({
+      content: [
+        { type: "input_text" },
+        { image_url: "data:image/png;base64,iVBORw0KGgo=" },
+        { image_url: "data:image/jpeg;base64,/9j/AQ==" },
       ],
     });
     expect(freezeCases(root, ["missing"])).rejects.toThrow("Unknown case IDs");
@@ -627,7 +749,7 @@ test("case snapshots freeze default and edited settings without adding them to o
   try {
     const item = fixture();
     for (const turn of item.observations) {
-      delete turn.screenshot;
+      turn.screenshots = [];
     }
     const file = path.join(root, "evals/cases.json");
     await Bun.write(file, JSON.stringify([item]));

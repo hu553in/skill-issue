@@ -10,9 +10,8 @@ private let captureLog = Logger(
 final class Capture {
     private var stream: SCStream?
     private var sink: AudioSink?
-    private var filter: SCContentFilter?
-    private var display: SCDisplay?
     private var inputs: CaptureInputs?
+    private var sessionID: UUID?
     private let speech = SpeechEngine()
     private var origin = 0.0
     var seconds: Double {
@@ -48,19 +47,27 @@ final class Capture {
         let content = try await SCShareableContent.excludingDesktopWindows(
             false, onScreenWindowsOnly: true)
         try Task.checkCancellation()
+        if inputs.screenshots {
+            let selected = try inputs.display.resolve(
+                in: CaptureDisplay.available(), mainID: CGMainDisplayID())
+            guard
+                selected.allSatisfy({ target in
+                    content.displays.contains(where: { $0.displayID == target.captureID })
+                })
+            else { throw AppFailure.displayUnavailable }
+        }
         guard
             let display = content.displays.first(where: { $0.displayID == CGMainDisplayID() })
                 ?? content.displays.first
-        else { throw AppFailure.failed }
-        self.display = display
+        else { throw AppFailure.noDisplays }
         let own = content.applications.filter {
             $0.processID == ProcessInfo.processInfo.processIdentifier
         }
         let filter = SCContentFilter(
             display: display, excludingApplications: own, exceptingWindows: [])
-        self.filter = filter
         origin = CMTimeGetSeconds(CMClockGetTime(CMClockGetHostTimeClock()))
         self.inputs = inputs
+        sessionID = UUID()
         do {
             guard inputs.hasAudio else { return }
             try await speech.start(failed: { Task { @MainActor in failed() } })
@@ -117,24 +124,83 @@ final class Capture {
             }
         }
     }
-    func screenshot() async throws -> (Data, Double)? {
-        guard let inputs else { throw AppFailure.failed }
-        guard inputs.screenshots else { return nil }
-        guard let filter, let display else { throw AppFailure.failed }
-        let config = SCStreamConfiguration()
-        let scale = min(1, 1600.0 / Double(display.width))
-        config.width = Int(Double(display.width) * scale)
-        config.height = Int(Double(display.height) * scale)
-        config.showsCursor = false
-        let image = try await SCScreenshotManager.captureImage(
-            contentFilter: filter, configuration: config)
-        guard
-            let data = NSBitmapImageRep(cgImage: image).representation(
-                using: .jpeg, properties: [.compressionFactor: 0.8])
+    func screenshots() async throws -> [Screenshot] {
+        guard let inputs, let sessionID else { throw CancellationError() }
+        guard inputs.screenshots else { return [] }
+        try Task.checkCancellation()
+        // Freeze the targets for this request, but refresh geometry for every capture batch.
+        let selected = try inputs.display.resolve(
+            in: CaptureDisplay.available(), mainID: CGMainDisplayID())
+        let origin = origin
+        guard CGPreflightScreenCaptureAccess() else { throw AppFailure.screenCapturePermission }
+        let content: SCShareableContent
+        do {
+            content = try await SCShareableContent.excludingDesktopWindows(
+                false, onScreenWindowsOnly: true)
+        } catch {
+            try checkSession(sessionID)
+            throw AppFailure.screenshotFailed("the selected displays")
+        }
+        let own = content.applications.filter {
+            $0.processID == ProcessInfo.processInfo.processIdentifier
+        }
+        var screenshots: [Screenshot] = []
+        for target in selected {
+            try checkSession(sessionID)
+            // A removed/reconfigured display must not be replaced by a different desktop.
+            guard
+                target.isAvailable(in: CaptureDisplay.available()),
+                let display = content.displays.first(where: { $0.displayID == target.captureID })
+            else { throw AppFailure.displayUnavailable }
+            do {
+                let filter = SCContentFilter(
+                    display: display, excludingApplications: own, exceptingWindows: [])
+                let config = try Self.screenshotConfiguration(
+                    contentSize: filter.contentRect.size, pointPixelScale: filter.pointPixelScale)
+                let image = try await SCScreenshotManager.captureImage(
+                    contentFilter: filter, configuration: config)
+                let capturedAt = max(
+                    0, CMTimeGetSeconds(CMClockGetTime(CMClockGetHostTimeClock())) - origin)
+                try checkSession(sessionID)
+                guard target.isAvailable(in: CaptureDisplay.available()) else {
+                    throw AppFailure.displayUnavailable
+                }
+                guard
+                    let data = NSBitmapImageRep(cgImage: image).representation(
+                        using: .jpeg, properties: [.compressionFactor: 0.8])
+                else { throw AppFailure.failed }
+                screenshots.append(
+                    Screenshot(
+                        displayID: target.id.uuidString, displayName: target.name,
+                        capturedAt: capturedAt, data: data))
+            } catch {
+                try checkSession(sessionID)
+                throw AppFailure.screenshotFailed(target.name)
+            }
+        }
+        return screenshots
+    }
+    private func checkSession(_ id: UUID) throws {
+        try Task.checkCancellation()
+        guard sessionID == id else { throw CancellationError() }
+    }
+    static func screenshotConfiguration(
+        contentSize: CGSize, pointPixelScale: Float
+    ) throws -> SCStreamConfiguration {
+        // ScreenCaptureKit reports the filter's content in points, but configures output in pixels.
+        let width = contentSize.width * CGFloat(pointPixelScale)
+        let height = contentSize.height * CGFloat(pointPixelScale)
+        guard pointPixelScale > 0, width.isFinite, height.isFinite, width >= 1, height >= 1
         else { throw AppFailure.failed }
-        return (data, seconds)
+        let scale = min(1, 2560 / max(width, height))
+        let config = SCStreamConfiguration()
+        config.width = max(1, Int(width * scale))
+        config.height = max(1, Int(height * scale))
+        config.showsCursor = false
+        return config
     }
     func stop() async {
+        sessionID = nil
         inputs = nil
         if let stream { try? await stream.stopCapture() }
         stream = nil
@@ -145,8 +211,6 @@ final class Capture {
         }
         await speech.stop()
         sink = nil
-        filter = nil
-        display = nil
     }
 }
 

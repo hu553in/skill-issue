@@ -94,7 +94,15 @@ import Testing
         transcript: [
             TranscriptSegment(
                 id: "mic.1", source: .microphone, start: 3, end: 4, text: "I have not used a map.")
-        ], screenshot: Data([1]), screenshotTime: 10.1)
+        ],
+        screenshots: [
+            Screenshot(
+                displayID: "external", displayName: "External display", capturedAt: 10.1,
+                data: Data([1])),
+            Screenshot(
+                displayID: "builtin", displayName: "Built-in display", capturedAt: 10.2,
+                data: Data([2])),
+        ])
     history.append(first)
     history.update("a", answer: "Use a hash map.", completed: false)
     history.append(
@@ -104,9 +112,32 @@ import Testing
                 TranscriptSegment(
                     id: "computer.2", source: .computer, start: 19, end: 20,
                     text: "You cannot use a hash map.")
-            ], screenshot: Data([2]), screenshotTime: 20.1))
+            ],
+            screenshots: [
+                Screenshot(
+                    displayID: "builtin", displayName: "Built-in display", capturedAt: 20.1,
+                    data: Data([3]))
+            ]))
     let messages = try history.input(through: "b")
     #expect(messages.count == 3)
+    let firstContent = try #require(messages[0]["content"] as? [[String: Any]])
+    let firstText = try #require(firstContent[0]["text"] as? String)
+    let observation = try #require(
+        JSONSerialization.jsonObject(with: Data(firstText.utf8)) as? [String: Any])
+    let screenshots = try #require(observation["screenshots"] as? [[String: Any]])
+    #expect(screenshots.compactMap { $0["display_id"] as? String } == ["external", "builtin"])
+    #expect(
+        screenshots.compactMap { $0["display_name"] as? String } == [
+            "External display", "Built-in display",
+        ])
+    #expect(screenshots.compactMap { $0["captured_at_seconds"] as? Double } == [10.1, 10.2])
+    #expect(
+        firstContent.dropFirst().compactMap { $0["image_url"] as? String } == [
+            "data:image/jpeg;base64,AQ==", "data:image/jpeg;base64,Ag==",
+        ])
+    let nextContent = try #require(messages[2]["content"] as? [[String: Any]])
+    #expect(nextContent.count == 2)
+    #expect(nextContent[1]["image_url"] as? String == "data:image/jpeg;base64,Aw==")
     #expect((messages[1]["content"] as? String)?.contains("Incomplete suggestion") == true)
     let input = try JSONSerialization.data(withJSONObject: messages)
     let text = String(decoding: input, as: UTF8.self)

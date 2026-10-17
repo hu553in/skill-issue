@@ -4,6 +4,8 @@ import SimpleKeychain
 
 enum AppFailure: Error {
     case failed, microphonePermission, microphoneUnavailable, screenCapturePermission
+    case noDisplays, displayUnavailable, captureStopped
+    case screenshotFailed(String)
     case shortcutUnavailable(String)
 
     var message: String {
@@ -18,6 +20,16 @@ enum AppFailure: Error {
         case .screenCapturePermission:
             return
                 "Allow Skill Issue in System Settings > Privacy & Security > Screen & System Audio Recording. Quit and reopen the app if macOS asks, then start the session again."
+        case .noDisplays:
+            return "No displays are available. Connect a display and try again."
+        case .displayUnavailable:
+            return
+                "The selected display is unavailable. Reconnect it, or stop any active session and choose another display in Settings."
+        case .captureStopped:
+            return
+                "Audio capture or transcription stopped. Check your input devices and start the session again."
+        case .screenshotFailed(let display):
+            return "Couldn't capture \(display). Try requesting the answer again."
         case .shortcutUnavailable(let shortcut):
             return "\(shortcut) is already used by another app. Choose other modifier keys."
         }
@@ -127,16 +139,28 @@ struct ViewState: Codable, Equatable, Sendable {
     }
 }
 
+struct Screenshot: Sendable {
+    var displayID: String
+    var displayName: String
+    var capturedAt: Double
+    var data: Data
+}
+
 struct Observation: Sendable {
     var requestID: String
     var cutoff: Double
     var transcript: [TranscriptSegment]
-    var screenshot: Data?
-    var screenshotTime: Double?
+    var screenshots: [Screenshot] = []
 
     func input() throws -> [String: Any] {
-        var value: [String: Any] = [
+        let value: [String: Any] = [
             "request_id": requestID, "cutoff_seconds": cutoff,
+            "screenshots": screenshots.map {
+                [
+                    "display_id": $0.displayID, "display_name": $0.displayName,
+                    "captured_at_seconds": $0.capturedAt,
+                ] as [String: Any]
+            },
             "transcript": transcript.map {
                 [
                     "id": $0.id, "source": $0.source.rawValue, "start_seconds": $0.start,
@@ -144,20 +168,14 @@ struct Observation: Sendable {
                 ] as [String: Any]
             },
         ]
-        if let screenshotTime {
-            value["screenshot"] = [
-                "captured_at_seconds": screenshotTime,
-                "description": "Main Mac display at this request",
-            ]
-        }
         let bytes = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
         var content: [[String: Any]] = [
             ["type": "input_text", "text": String(decoding: bytes, as: UTF8.self)]
         ]
-        if let screenshot {
+        for screenshot in screenshots {
             content.append([
                 "type": "input_image",
-                "image_url": "data:image/jpeg;base64,\(screenshot.base64EncodedString())",
+                "image_url": "data:image/jpeg;base64,\(screenshot.data.base64EncodedString())",
             ])
         }
         return ["role": "user", "content": content]

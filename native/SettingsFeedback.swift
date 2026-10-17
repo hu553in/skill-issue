@@ -141,7 +141,7 @@ struct SettingsNotice: View {
                 }
             }
         }
-        .padding(12)
+        .padding(SettingsLayout.spacing)
         .background(
             (warning ? Color.orange : .red).opacity(0.10), in: RoundedRectangle(cornerRadius: 10)
         )

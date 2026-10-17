@@ -5,6 +5,7 @@ struct CaptureInputs: Equatable, Sendable {
     var microphone: String? = ""
     var systemAudio = true
     var screenshots = true
+    var display: DisplaySelection = .main
 
     var hasAudio: Bool { microphone != nil || systemAudio }
     var isEnabled: Bool { hasAudio || screenshots }
@@ -19,6 +20,7 @@ extension CaptureInputs {
             ? nil : defaults.string(forKey: "microphone") ?? ""
         systemAudio = fields["systemAudio"] as? Bool ?? true
         screenshots = fields["screenshots"] as? Bool ?? true
+        display = (fields["display"] as? String).flatMap(DisplaySelection.init(rawValue:)) ?? .main
     }
 
     func save(to defaults: UserDefaults) {
@@ -27,6 +29,7 @@ extension CaptureInputs {
             [
                 "microphone": microphone != nil, "systemAudio": systemAudio,
                 "screenshots": screenshots,
+                "display": display.rawValue,
             ], forKey: "captureInputs")
     }
 }

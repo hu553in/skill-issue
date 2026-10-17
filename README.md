@@ -4,8 +4,8 @@
 
 A macOS menu bar interview assistant that transcribes computer audio and your microphone locally.
 Request answers through your ChatGPT subscription, using the conversation and optional screenshots
-of your main display as context. Read answers on your phone and control the encrypted viewer from
-your Mac.
+of your selected displays as context. Read answers on your phone and control the encrypted viewer
+from your Mac.
 
 Skill Issue is opinionated and simple, with few controls and predictable defaults to keep it **easy
 to use under interview stress**.
@@ -219,6 +219,11 @@ connection returns, the viewer follows the Mac's current selection; offline taps
   not captured; all three disabled makes **Start session** unavailable. Input choices are saved
   immediately. Audio capture can still require screen/system audio permission when screenshots are
   off.
+- **Capture display** appears when **Include screenshot** is on. Choose **Main display** (the
+  default), **All displays** or a specific monitor. Main display follows macOS's primary display;
+  All displays uses the connected displays at each request, capturing mirrored content once. A
+  specific monitor stays selected when disconnected and is never replaced automatically. Turning
+  screenshots off preserves the choice.
 - **Answer language** defaults to English and is independent of speech recognition. Your choice is
   saved as soon as you select it.
 - **Answer settings…** opens verbosity, preferred coding language, interview context and custom
@@ -408,6 +413,12 @@ answers and captured context. If an error ends the session, the
 
 An enabled input that fails reports an error; the app does not silently disable it.
 
+- **Screenshot failure:** the answer request fails and keeps its captured transcript. Reconnect a
+  missing monitor or stop the session to choose another, then request an answer again. **All
+  displays** refreshes its selection on the next request.
+- **Audio capture failure:** the session ends. Reconnect the input and start a new session.
+  Disconnecting a display can also interrupt audio capture.
+
 | Problem                          | What to do                                                                                             |
 | -------------------------------- | ------------------------------------------------------------------------------------------------------ |
 | Temporary answer failure         | Choose **Retry** or **Request answer**, as offered.                                                    |
@@ -447,10 +458,14 @@ errors, see [Access recovery](#access-recovery).
 
 ### Sent to OpenAI
 
-The app sends chronological transcripts, screenshots, earlier AI suggestions and your current answer
-settings directly to OpenAI. Each answer request adds a screenshot when enabled and the latest
-transcripts from enabled audio inputs. Screenshots are captured only when you request an answer.
-Reading an old answer does not change that context.
+Each answer request sends the session's transcripts, screenshots and earlier AI suggestions,
+together with your current answer settings, directly to OpenAI. Reading an old answer does not
+change that context.
+
+The request adds new transcripts from enabled audio inputs and, when enabled, one screenshot per
+selected display. Screenshots exclude the app and cursor. Images keep their proportions and are
+reduced to at most 2560 pixels on the longest side, without enlarging smaller images, then sent as
+JPEG.
 
 Changed or cleared answer settings replace the previous settings on the next request. Earlier AI
 answers remain in session history and may still refer to that earlier context.
@@ -461,8 +476,8 @@ Requests use your ChatGPT subscription with `store: false`. Model availability a
 ### Stored by the viewer and relay
 
 - The relay stores encrypted answers and viewer state using AES-256-GCM. The decryption key is in
-  the link's URL fragment, after `#`, and is never sent to the relay. Readers cannot publish state
-  or control the Mac.
+  the link's URL fragment, after `#`, and is never sent to the relay. Viewers can change the
+  selected answer, but cannot request answers or control capture.
 - **Anyone with the full link can read the session**, unless Cloudflare Access restricts browser
   access. The link remains in browser history.
 - The browser saves reading positions, not answer text. During Access sign-in, the tab temporarily
@@ -562,11 +577,12 @@ rendering can change with macOS, Chromium or desktop appearance settings.
 ### Prompt evaluations
 
 Sign in through the app, enable ChatGPT plan usage, then quit the app and keep it closed during the
-run. The evaluator uses that selected saved account and its model/effort settings, including token
-refresh. Answer settings come only from the synthetic cases: omitted settings mean Medium verbosity
-and three empty text fields. It never reads your saved coding preference, interview context or
-custom instructions. It consumes the account's usage without starting a session, audio capture or
-screen capture.
+run. The evaluator uses the selected saved account and defaults to its model/effort settings. It
+refreshes tokens as needed and consumes the account's usage without starting capture or a session.
+
+Answer settings come only from the synthetic cases: omitted settings mean Medium verbosity and three
+empty text fields. The evaluator never reads your saved coding preference, interview context or
+custom instructions.
 
 ```sh
 bun eval:prompts --list
@@ -581,13 +597,14 @@ bun eval:prompts --prompt before=git:HEAD~1:native/Resources/prompt.md \
   --prompt after=native/Resources/prompt.md --case memory-followup,sql-multipart --repeat 2
 ```
 
-Each run saves base prompts, inputs, settings, answers, timing, token usage when available, and a
-blinded model comparison under `.build/prompt-evals/`. Read `report.md` alongside `manifest.json`
-and `results.jsonl`. Model grades need human review; generated code is not automatically executed.
-All variants use the current app request builder, including its output-language instructions. Fixed
-inputs make comparisons repeatable, but model outputs can vary. On failure, completed results remain
-available and requests are not retried automatically. Existing output directories are never
-overwritten.
+Each run saves prompts, inputs, settings, answers, timing, available token usage and a blinded model
+comparison under `.build/prompt-evals/`. Read `report.md` alongside `manifest.json` and
+`results.jsonl`. Existing output directories are never overwritten; on failure, completed results
+remain available and requests are not retried automatically.
+
+All variants use the current app request builder, including its output-language instructions. Inputs
+are fixed, but model outputs can vary. Review model grades yourself; generated code is not
+automatically executed.
 
 Use `--models` to see the saved account's available models and `--help` for model, effort, output,
 and judging options. The first run builds a separate Swift cache in `.build/prompt-eval`.

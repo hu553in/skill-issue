@@ -20,10 +20,31 @@ struct CaptureInputsTests {
     @Test func malformedPreferencesKeepValidChoicesAndRestoreDefaultsIndependently() {
         let defaults = TestDefaults()
         defaults.set(
-            ["microphone": false, "systemAudio": "invalid", "screenshots": false],
+            [
+                "microphone": false, "systemAudio": "invalid", "screenshots": false,
+                "display": "unknown-display",
+            ],
             forKey: "captureInputs")
         let restored = CaptureInputs(defaults: defaults)
         #expect(restored.microphone == nil && restored.systemAudio && !restored.screenshots)
+        #expect(restored.display == .main)
+
+        defaults.set(
+            ["microphone": true, "systemAudio": false, "screenshots": "invalid", "display": "all"],
+            forKey: "captureInputs")
+        let partiallyRestored = CaptureInputs(defaults: defaults)
+        #expect(partiallyRestored.microphone?.isEmpty == true && !partiallyRestored.systemAudio)
+        #expect(partiallyRestored.screenshots && partiallyRestored.display == .all)
+    }
+
+    @Test(arguments: [DisplaySelection.main, .all, .display(UUID())])
+    func displaySelectionSurvivesRestartWithScreenshotsDisabled(_ selection: DisplaySelection) {
+        let defaults = TestDefaults()
+        let inputs = CaptureInputs(screenshots: false, display: selection)
+        inputs.save(to: defaults)
+        let restored = CaptureInputs(defaults: defaults)
+        #expect(restored == inputs)
+        #expect(restored.isEnabled && restored.hasAudio)
     }
 
     @Test(arguments: 0..<8)
@@ -52,13 +73,14 @@ struct CaptureInputsTests {
                 TranscriptSegment(
                     id: "mic", source: .microphone, start: 1, end: 3,
                     text: "Explain optimistic locking.")
-            ], screenshot: nil, screenshotTime: nil)
+            ])
         let content = try #require(observation.input()["content"] as? [[String: String]])
         #expect(content.count == 1 && content[0]["type"] == "input_text")
         let text = try #require(content[0]["text"])
         let json = try #require(
             JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
-        #expect(json["screenshot"] == nil)
+        let screenshots = try #require(json["screenshots"] as? [[String: Any]])
+        #expect(screenshots.isEmpty)
         let transcript = try #require(json["transcript"] as? [[String: Any]])
         #expect(
             transcript.count == 1

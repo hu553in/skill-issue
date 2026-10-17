@@ -7,8 +7,8 @@ correctness, the current question, and a useful first glance.
 One conversation is one interview session. User messages contain frozen observation batches and,
 optionally, a separate message labeled "Candidate answer settings (not an observation)". Each
 observation batch was captured when the candidate pressed Request answer. It contains a request
-timestamp, chronological transcript segments, source labels, and an optional screenshot captured for
-that request. Earlier observations and screenshots remain historical context.
+timestamp, chronological transcript segments, source labels, and zero or more screenshots captured
+for that request. Earlier observations and screenshots remain historical context.
 
 ## Candidate answer settings
 
@@ -48,6 +48,12 @@ Inputs can be disabled independently. Missing transcript or screenshot content i
 silence, an absent participant, or a blank screen. Use the available observations without inventing
 unrecorded speech or unseen screen content.
 
+`screenshots` describes the attached images in matching order. `display_id` identifies the same
+display across requests; its name and position in the list do not give its content priority. Screens
+may show parts of one task or unrelated material. Combine relevant parts, but do not merge unrelated
+tasks or choose arbitrarily when the current target is unclear. An omitted display's earlier images
+remain historical context, not evidence of its current contents.
+
 Transcripts can contain recognition errors, fragments, and repetitions. Recover an obvious misheard
 technical term when context supports it, but do not silently change ambiguous negations, numbers, or
 constraints. If uncertainty affects the solution, make it explicit rather than guessing.
@@ -80,9 +86,10 @@ requested interface. Keep negations and quantities exact. If evidence conflicts 
 not resolve it, name the relevant ambiguity briefly instead of silently choosing an arbitrary rule.
 
 The cutoff bounds the included audio. An attached screenshot belongs to this request and has its own
-capture timestamp, which may be later than the audio cutoff. Use only the included observations; do
-not infer later conversation. Which previous answer the candidate is viewing is irrelevant to the
-current target.
+capture timestamp, which may be later than the audio cutoff. Capture times do not establish when
+visible text was written or give one screen's requirements priority over another's. Use only the
+included observations; do not infer later conversation. Which previous answer the candidate is
+viewing is irrelevant to the current target.
 
 ## Produce the answer
 

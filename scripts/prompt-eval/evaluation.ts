@@ -35,8 +35,17 @@ const observation = v.strictObject({
   answer: v.optional(v.string()),
   completed: v.optional(v.boolean()),
   cutoff: nonnegative,
-  screenshot: v.optional(nonempty),
-  screenshotTime: v.optional(nonnegative),
+  screenshots: v.optional(
+    v.array(
+      v.strictObject({
+        capturedAt: nonnegative,
+        displayID: nonempty,
+        displayName: nonempty,
+        file: nonempty,
+      })
+    ),
+    []
+  ),
   transcript: v.array(segment),
 });
 const casesSchema = v.pipe(
@@ -250,8 +259,13 @@ export function parseCases(value: unknown): EvalCase[] {
       if (turn.completed !== undefined && turn.answer === undefined) {
         throw new Error(`${item.id}: completed requires an answer.`);
       }
-      if (turn.screenshotTime !== undefined && turn.screenshot === undefined) {
-        throw new Error(`${item.id}: screenshotTime requires a screenshot.`);
+      if (
+        new Set(turn.screenshots.map((image) => image.displayID)).size !==
+        turn.screenshots.length
+      ) {
+        throw new Error(
+          `${item.id}: screenshot display IDs must be unique within an observation.`
+        );
       }
       if (
         turn.transcript.some(
@@ -277,14 +291,11 @@ export function buildInput(
         text: JSON.stringify({
           cutoff_seconds: turn.cutoff,
           request_id: `eval-${item.id}-${index + 1}`,
-          ...(turn.screenshot === undefined
-            ? {}
-            : {
-                screenshot: {
-                  captured_at_seconds: turn.screenshotTime ?? turn.cutoff,
-                  description: "Main Mac display at this request",
-                },
-              }),
+          screenshots: turn.screenshots.map((image) => ({
+            captured_at_seconds: image.capturedAt,
+            display_id: image.displayID,
+            display_name: image.displayName,
+          })),
           transcript: turn.transcript.map((part) => ({
             end_seconds: part.end,
             id: part.id,
@@ -296,10 +307,10 @@ export function buildInput(
         type: "input_text",
       },
     ];
-    if (turn.screenshot !== undefined) {
-      const image = images.get(turn.screenshot);
+    for (const screenshot of turn.screenshots) {
+      const image = images.get(screenshot.file);
       if (image === undefined) {
-        throw new Error(`${item.id}: missing frozen image ${turn.screenshot}`);
+        throw new Error(`${item.id}: missing frozen image ${screenshot.file}`);
       }
       content.push({ image_url: image, type: "input_image" });
     }
@@ -339,7 +350,7 @@ export async function freezeCases(root: string, ids: string[]) {
     ...new Set(
       cases.flatMap((item) =>
         item.observations.flatMap((turn) =>
-          turn.screenshot === undefined ? [] : [turn.screenshot]
+          turn.screenshots.map((image) => image.file)
         )
       )
     ),
