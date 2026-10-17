@@ -697,9 +697,19 @@ final class CallbackServer {
                     "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n\(body)"
                 connection.send(
                     content: Data(response.utf8),
-                    completion: .contentProcessed { _ in connection.cancel() })
-                self.continuation.yield(values)
-                self.continuation.finish()
+                    completion: .contentProcessed { [weak self, values] error in
+                        connection.cancel()
+                        Task { @MainActor in
+                            guard let self, !self.stopped else { return }
+                            if let error {
+                                self.continuation.finish(throwing: error)
+                            } else {
+                                // The caller may stop the server as soon as it receives the callback.
+                                self.continuation.yield(values)
+                                self.continuation.finish()
+                            }
+                        }
+                    })
             }
         }
     }

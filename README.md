@@ -622,9 +622,9 @@ For a patch release:
 bun release:patch
 ```
 
-Use `bun release:minor` or `bun release:major` instead for a larger version change. Release It! runs
-the full check, updates `package.json`, creates the release commit and annotated `vX.Y.Z` tag, and
-pushes both.
+Use `bun release:minor` or `bun release:major` instead for a larger version change. Release It!
+updates `package.json` and creates the release commit, running `bun check:fix` through the
+pre-commit hook. After the commit succeeds, it creates the annotated `vX.Y.Z` tag and pushes both.
 
 After the web, Swift and sanitizer checks pass, CI publishes the ZIP and generated release notes.
 The notes include a Deploy to Cloudflare button pinned to the tag, the Bun version and source

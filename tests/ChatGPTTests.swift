@@ -953,6 +953,28 @@ struct ChatGPTTests {
         #expect(!opened)
     }
 
+    @Test func callbackResponseSurvivesImmediateServerStop() async throws {
+        let server = try CallbackServer()
+        defer { server.stop() }
+        let redirect = try await server.start()
+        let callback = Task {
+            defer { server.stop() }
+            return try await server.callback()
+        }
+        defer { callback.cancel() }
+        var request = URLRequest(
+            url: try #require(URL(string: redirect + "?state=test-state&code=test-code&client_id="))
+        )
+        request.timeoutInterval = 3
+        let (body, response) = try await URLSession.shared.data(for: request)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        #expect(String(decoding: body, as: UTF8.self) == "You can return to Skill Issue.")
+        #expect(
+            try await callback.value == [
+                "state": "test-state", "code": "test-code", "client_id": "",
+            ])
+    }
+
     @Test(arguments: [false, true])
     func callbackStopClosesIdleAndIncompleteRequests(_ partial: Bool) async throws {
         let server = try CallbackServer()
