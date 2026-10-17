@@ -1,4 +1,3 @@
-import AVFoundation
 import AppKit
 import Carbon
 import Combine
@@ -37,7 +36,8 @@ final class Model: ObservableObject {
     @Published private(set) var shortcutError = ""
     private(set) var shortcutsSuspended = false
     @Published var configuringShortcuts = false
-    @Published private(set) var microphone: String
+    @Published private(set) var captureInputs: CaptureInputs
+    var microphone: String? { captureInputs.microphone }
     @Published private(set) var language: String
     @Published private(set) var answerSettings: AnswerSettings
     @Published var configuringAnswerSettings = false
@@ -71,7 +71,9 @@ final class Model: ObservableObject {
     var status: String {
         if terminating { return "Quitting…" }
         if let operation { return operation.label }
-        if state.live { return answering ? "Thinking…" : "Listening" }
+        if state.live {
+            return answering ? "Thinking…" : state.audioEnabled ? "Listening" : "Session active"
+        }
         if account.isEmpty { return "Signed out" }
         if chatGPT.requiresSignIn { return "Sign in required" }
         if needsPlanPermission { return "Permission required" }
@@ -156,7 +158,7 @@ final class Model: ObservableObject {
     }
     var canStartSession: Bool {
         guard !working, !state.live, canUseChatGPT,
-            let model = selectedModel, !viewerSetupRequired
+            let model = selectedModel, !viewerSetupRequired, captureInputs.isEnabled
         else {
             return false
         }
@@ -176,6 +178,7 @@ final class Model: ObservableObject {
             return viewerSetupIssue == .invalidEndpoint
                 ? "Enter a valid viewer endpoint first." : "Configure Cloudflare Access first."
         }
+        if let reason = captureInputs.unavailableReason { return reason }
         return "Choose a supported reasoning effort first."
     }
     // Session resources stay fixed from startup until capture and relay have stopped.
@@ -221,7 +224,7 @@ final class Model: ObservableObject {
         shortcutModifiers = savedModifiers.isValid ? savedModifiers : .standard
         viewerAccessEnabled = defaults.bool(forKey: "viewerAccessEnabled")
         relayURL = defaults.string(forKey: "relayURL") ?? "http://127.0.0.1:8787"
-        microphone = defaults.string(forKey: "microphone") ?? ""
+        captureInputs = CaptureInputs(defaults: defaults)
         language = defaults.string(forKey: "language") ?? "English"
         answerSettings = AnswerSettings(defaults: defaults)
         let savedFontSize = defaults.integer(forKey: "fontSize")
@@ -243,10 +246,20 @@ final class Model: ObservableObject {
         restoreAccounts()
         if viewerAccessEnabled { restoreViewerCredentials() }
     }
-    func selectMicrophone(_ identifier: String) {
+    func selectMicrophone(_ identifier: String?) {
         guard canConfigureSession else { return }
-        microphone = identifier
-        defaults.set(identifier, forKey: "microphone")
+        captureInputs.microphone = identifier
+        captureInputs.save(to: defaults)
+    }
+    func setSystemAudio(_ enabled: Bool) {
+        guard canConfigureSession else { return }
+        captureInputs.systemAudio = enabled
+        captureInputs.save(to: defaults)
+    }
+    func setScreenshots(_ enabled: Bool) {
+        guard canConfigureSession else { return }
+        captureInputs.screenshots = enabled
+        captureInputs.save(to: defaults)
     }
     func selectLanguage(_ selected: String) {
         guard canEditPreferences, AnswerLanguage.all.contains(where: { $0.name == selected }) else {
@@ -565,10 +578,11 @@ final class Model: ObservableObject {
     func startSession() {
         guard canStartSession, let model = selectedModel else { return }
         let effort = reasoningEffort
+        let inputs = captureInputs
         publishTask?.cancel()
         monitorTask?.cancel()
         cancelAnswer()
-        operation = .preparingSpeech("Preparing speech…")
+        operation = inputs.hasAudio ? .preparingSpeech("Preparing speech…") : .starting("Starting…")
         clearFeedback()
         sessionID = UUID()
         let session = sessionID
@@ -576,12 +590,13 @@ final class Model: ObservableObject {
         currentRequest = nil
         snapshotTask = nil
         captureFailure = nil
-        state = ViewState(fontSize: state.fontSize, modifiers: state.modifiers)
+        state = ViewState(
+            audioEnabled: inputs.hasAudio, fontSize: state.fontSize, modifiers: state.modifiers)
         startTask = Task { [self] in
             defer { startTask = nil }
             do {
                 try Task.checkCancellation()
-                try await capture.prepare { [weak self] message in
+                try await capture.prepare(inputs: inputs) { [weak self] message in
                     Task { @MainActor in
                         guard let self, self.sessionID == session,
                             case .preparingSpeech = self.operation
@@ -623,7 +638,7 @@ final class Model: ObservableObject {
                 }
                 operation = .starting("Starting capture…")
                 try await capture.start(
-                    microphone: microphone,
+                    inputs: inputs,
                     failed: { [weak self] in self?.captureFailed(session: session) })
                 try Task.checkCancellation()
                 guard captureFailure != session else { throw AppFailure.failed }
@@ -712,21 +727,27 @@ final class Model: ObservableObject {
         // Both operations start at this key press. A newer request does not
         // cancel capture finalization or discard the older observation batch.
         let frozen = capture.freeze()
-        let captured = Task { () throws -> Observation in
-            async let image = try? capture.screenshot()
+        let captured = Task { () throws -> (Observation, (any Error)?) in
+            async let image = capture.screenshot()
             for try await (cutoff, transcript) in frozen {
-                let screenshot = await image
-                return Observation(
-                    requestID: id, cutoff: cutoff, transcript: transcript,
-                    screenshot: screenshot?.0, screenshotTime: screenshot?.1)
+                var screenshot: (Data, Double)?
+                var screenshotError: (any Error)?
+                do { screenshot = try await image } catch { screenshotError = error }
+                return (
+                    Observation(
+                        requestID: id, cutoff: cutoff, transcript: transcript,
+                        screenshot: screenshot?.0, screenshotTime: screenshot?.1),
+                    screenshotError
+                )
             }
             throw AppFailure.failed
         }
         let snapshot = Task { () throws -> Observation in
-            let observation = try await captured.value
+            let (observation, screenshotError) = try await captured.value
             _ = try? await previous?.value
             guard sessionID == session else { throw CancellationError() }
             history.append(observation)
+            if let screenshotError { throw screenshotError }
             return observation
         }
         snapshotTask = snapshot
@@ -738,9 +759,9 @@ final class Model: ObservableObject {
                 }
             }
             do {
-                let observation = try await snapshot.value
+                _ = try await snapshot.value
                 try Task.checkCancellation()
-                guard observation.screenshot != nil, sessionID == session, currentRequest == id
+                guard sessionID == session, currentRequest == id
                 else { throw AppFailure.failed }
                 let input = try history.input(through: id)
                 try await chatGPT.answer(
@@ -851,11 +872,6 @@ struct SettingsView: View {
     let toggleIcon: () -> Void
     var showSystemPrompt: () -> Void = {}
     var maximumHeight: CGFloat?
-    private var microphones: [AVCaptureDevice] {
-        AVCaptureDevice.DiscoverySession(
-            deviceTypes: [.microphone, .external], mediaType: .audio, position: .unspecified
-        ).devices
-    }
     private var answerIndex: Int {
         model.state.answers.firstIndex { $0.id == model.state.selectedID } ?? -1
     }
@@ -869,6 +885,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: SettingsLayout.sectionSpacing) {
             SettingsHeader(
                 status: model.status, working: model.working, live: model.state.live,
+                audioEnabled: model.state.audioEnabled,
                 answering: model.answering,
                 canStart: model.canStartSession,
                 error: model.error.isEmpty ? model.shortcutError : model.error,
@@ -1013,13 +1030,7 @@ struct SettingsView: View {
                 Text("Changes apply to the next answer request.")
                     .font(.callout).foregroundStyle(Color(nsColor: SettingsColors.secondaryText))
                     .padding(.bottom, SettingsLayout.compactSpacing)
-                Picker(
-                    "Microphone",
-                    selection: Binding(get: { model.microphone }, set: model.selectMicrophone)
-                ) {
-                    Text("System default").tag("")
-                    ForEach(microphones, id: \.uniqueID) { Text($0.localizedName).tag($0.uniqueID) }
-                }.disabled(!model.canConfigureSession).help(model.lockReason ?? "")
+                CaptureSettingsView(model: model)
                 LabeledContent("Viewer endpoint") {
                     HStack(spacing: SettingsLayout.spacing) {
                         TextField(

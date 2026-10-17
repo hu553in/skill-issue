@@ -3,8 +3,9 @@
 [![CI](https://github.com/hu553in/skill-issue/actions/workflows/ci.yml/badge.svg)](https://github.com/hu553in/skill-issue/actions/workflows/ci.yml)
 
 A macOS menu bar interview assistant that transcribes computer audio and your microphone locally.
-Request answers through your ChatGPT subscription, using the conversation and a screenshot of your
-main display as context. Read answers on your phone and control the encrypted viewer from your Mac.
+Request answers through your ChatGPT subscription, using the conversation and optional screenshots
+of your main display as context. Read answers on your phone and control the encrypted viewer from
+your Mac.
 
 Skill Issue is opinionated and simple, with few controls and predictable defaults to keep it **easy
 to use under interview stress**.
@@ -162,9 +163,11 @@ reading on a phone. The default `http://127.0.0.1:8787` works only on the Mac an
 
 1. Open Settings and select **Sign in with ChatGPT**. For a saved account, follow
    [ChatGPT accounts](#chatgpt-accounts).
-2. Choose your microphone and answer language.
-3. Select **Start session** and allow microphone and screen/system audio access. On first use, the
-   app downloads about 642 MB of speech-model files.
+2. Choose your answer language and inputs: a microphone or **Off**, **System audio** and **Include
+   screenshot**. Keep at least one input enabled.
+3. Select **Start session** and allow the requested capture permissions. The first session with
+   audio downloads about 642 MB of speech-model files. Screenshot-only sessions skip speech-model
+   preparation and do not request microphone access.
 4. Open the session link on your phone or scan its QR code. Keep the browser in the foreground and
    the phone unlocked.
 5. Select **Request answer** in Settings, or hold **Control + Option + Command** and press
@@ -209,10 +212,15 @@ connection returns, the viewer follows the Mac's current selection; offline taps
   them during a session, including while an answer is being prepared or generated. Model and effort
   stay disabled while their choices load. Each request keeps the values it started with, and older
   answers keep their language.
-- **Microphone, Viewer endpoint and Cloudflare Access** are locked while a session starts, runs or
-  stops. Unrelated account and model loading does not lock these settings.
-- **Answer language** defaults to English and is independent of speech recognition. Microphone and
-  language choices are saved as soon as you select them.
+- **Capture inputs, Viewer endpoint and Cloudflare Access** are locked while a session starts, runs
+  or stops. Unrelated account and model loading does not lock these settings.
+- **Inputs** default to the system's microphone with system audio and screenshots enabled. Any
+  nonempty combination works, including audio-only and screenshot-only sessions. Disabled inputs are
+  not captured; all three disabled makes **Start session** unavailable. Input choices are saved
+  immediately. Audio capture can still require screen/system audio permission when screenshots are
+  off.
+- **Answer language** defaults to English and is independent of speech recognition. Your choice is
+  saved as soon as you select it.
 - **Answer settings…** opens verbosity, preferred coding language, interview context and custom
   instructions. Verbosity defaults to Medium; the text fields start empty. A task's required coding
   language takes priority over your preference. Verbosity is unavailable for models that do not
@@ -398,6 +406,8 @@ Answer requests never retry automatically. Recoverable answer errors keep the cu
 answers and captured context. If an error ends the session, the
 [session cleanup rules](#end-a-session) apply.
 
+An enabled input that fails reports an error; the app does not silently disable it.
+
 | Problem                          | What to do                                                                                             |
 | -------------------------------- | ------------------------------------------------------------------------------------------------------ |
 | Temporary answer failure         | Choose **Retry** or **Request answer**, as offered.                                                    |
@@ -438,7 +448,8 @@ errors, see [Access recovery](#access-recovery).
 ### Sent to OpenAI
 
 The app sends chronological transcripts, screenshots, earlier AI suggestions and your current answer
-settings directly to OpenAI. Each answer request adds a screenshot and the latest transcripts.
+settings directly to OpenAI. Each answer request adds a screenshot when enabled and the latest
+transcripts from enabled audio inputs. Screenshots are captured only when you request an answer.
 Reading an old answer does not change that context.
 
 Changed or cleared answer settings replace the previous settings on the next request. Earlier AI

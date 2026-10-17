@@ -11,6 +11,7 @@ import type { SelectionCommand } from "./selection";
 
 export const empty: ViewState = {
   answers: [],
+  audioEnabled: true,
   canAnswer: false,
   error: "",
   fontSize: 20,

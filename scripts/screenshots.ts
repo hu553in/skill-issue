@@ -19,6 +19,8 @@ await mkdir(build, { recursive: true });
 const temporary = await mkdtemp(path.join(build, "capture-"));
 const output = path.join(root, "assets/screenshots/overview.svg");
 const nativePNG = path.join(temporary, "settings.png");
+const settingsFrameSize = { height: 1680, width: 1400 };
+const viewerFrameSize = { height: 1840, width: 1040 };
 let child: ReturnType<typeof Bun.spawn> | undefined;
 let browser: Browser | undefined;
 let server: Bun.Subprocess<"ignore", "pipe", "pipe"> | undefined;
@@ -316,13 +318,12 @@ async function startViewer() {
   }
 }
 
-// Framing from 0a891c4: Settings 1400×1600, viewer 1040×1840, then equal-height SVG.
+// Keep room around both windows, then scale their frames to the same displayed height.
 async function frame(png: Buffer, settings: boolean) {
   if (!browser) {
     throw new Error("Chromium was not started");
   }
-  const width = settings ? 1400 : 1040;
-  const height = settings ? 1600 : 1840;
+  const { height, width } = settings ? settingsFrameSize : viewerFrameSize;
   const page = await browser.newPage({
     deviceScaleFactor: 1,
     viewport: { height, width },
@@ -363,15 +364,19 @@ try {
   const viewer = await captureViewer();
   const settingsFrame = await frame(settings, true);
   const viewerFrame = await frame(viewer, false);
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="2344.347826087" height="1600" viewBox="0 0 2344.347826087 1600" fill="none">
+  const { height } = settingsFrameSize;
+  const viewerWidth = (viewerFrameSize.width * height) / viewerFrameSize.height;
+  const viewerX = settingsFrameSize.width + 40;
+  const width = viewerX + viewerWidth;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" fill="none">
   <title>Skill Issue settings and phone viewer</title>
   <desc>macOS settings with a demo account and the phone viewer with a sample answer, shown at the same height.</desc>
   <defs>
-    <clipPath id="settings-frame"><rect width="1400" height="1600" rx="40" /></clipPath>
-    <clipPath id="viewer-frame"><rect x="1440" width="904.347826087" height="1600" rx="40" /></clipPath>
+    <clipPath id="settings-frame"><rect width="${settingsFrameSize.width}" height="${height}" rx="40" /></clipPath>
+    <clipPath id="viewer-frame"><rect x="${viewerX}" width="${viewerWidth}" height="${height}" rx="40" /></clipPath>
   </defs>
-  <image width="1400" height="1600" clip-path="url(#settings-frame)" xlink:href="data:image/png;base64,${settingsFrame.toString("base64")}" />
-  <image x="1440" width="904.347826087" height="1600" clip-path="url(#viewer-frame)" xlink:href="data:image/png;base64,${viewerFrame.toString("base64")}" />
+  <image width="${settingsFrameSize.width}" height="${height}" clip-path="url(#settings-frame)" xlink:href="data:image/png;base64,${settingsFrame.toString("base64")}" />
+  <image x="${viewerX}" width="${viewerWidth}" height="${height}" clip-path="url(#viewer-frame)" xlink:href="data:image/png;base64,${viewerFrame.toString("base64")}" />
 </svg>
 `;
   if (

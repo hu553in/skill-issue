@@ -16,6 +16,7 @@ const command = v.object({
 });
 export const ViewStateSchema = v.object({
   answers: v.array(answer),
+  audioEnabled: v.optional(v.boolean(), true),
   canAnswer: v.boolean(),
   command: v.nullish(command),
   error: v.string(),

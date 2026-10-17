@@ -185,6 +185,77 @@ test("browser disconnection keeps local navigation and reconnect adopts Mac sele
   expect(requests).toHaveLength(1);
 });
 
+for (const audioEnabled of [true, false]) {
+  test(`reconnect waits for current session state before restoring activity (audio ${audioEnabled})`, async ({
+    page,
+    relay,
+  }) => {
+    const sockets: WebSocketRoute[] = [];
+    const replay = Promise.withResolvers<() => void>();
+    await page.routeWebSocket("**/rooms/*/socket", (socket) => {
+      sockets.push(socket);
+      const server = socket.connectToServer();
+      if (sockets.length > 1) {
+        let replayed = false;
+        server.onMessage((message) => {
+          const packet = parseViewerMessage(JSON.parse(String(message)));
+          if (packet?.type === "state" && !replayed) {
+            replay.resolve(() => {
+              replayed = true;
+              socket.send(message);
+            });
+          } else {
+            socket.send(message);
+          }
+        });
+      }
+    });
+    const answer: AnswerCard = {
+      id: "a",
+      language: "English",
+      status: "generating",
+      text: "A partially streamed answer",
+    };
+    const state: ViewState = {
+      ...empty,
+      answers: [answer],
+      audioEnabled,
+      canAnswer: true,
+      live: true,
+      selectedID: answer.id,
+    };
+    await relay.publish(state);
+    await page.goto(await relay.viewerURL());
+    const status = page.getByRole("status");
+    const article = page.locator("article");
+    const requestHint = page.locator("footer").getByText("request answer");
+    await expect(status).toHaveText("Thinking…");
+    const [initial] = sockets;
+    if (!initial) {
+      throw new Error("No viewer socket");
+    }
+    await initial.close({ code: 1001 });
+    const release = await replay.promise;
+    await expect(status).toHaveText("Connected");
+    await expect(status.locator("i")).not.toHaveClass("live");
+    await expect(article).toContainText(answer.text);
+    await expect(article).toHaveAttribute("aria-busy", "false");
+    await expect(requestHint).toHaveCount(0);
+    release();
+    await expect(status).toHaveText("Thinking…");
+    await expect(article).toHaveAttribute("aria-busy", "true");
+    await expect(requestHint).toBeVisible();
+    await relay.publish({
+      ...state,
+      answers: [{ ...answer, status: "complete" }],
+    });
+    await expect(status).toHaveText(
+      audioEnabled ? "Listening" : "Session active"
+    );
+    await expect(article).toHaveAttribute("aria-busy", "false");
+  });
+}
+
 test("Mac replacement restores shared navigation and skips old scroll commands", async ({
   page,
   relay,
@@ -1394,6 +1465,89 @@ test("generation and language follow each request while older answers remain rea
   await page.getByRole("button", { name: "Previous answer" }).click();
   await expect(pane.locator("article")).toContainText("Previous answer");
   await expect(pane.locator("article")).toHaveAttribute("lang", "en");
+});
+
+test("screenshot-only sessions stay ready for requests, generation and answer navigation", async ({
+  page,
+  relay,
+}) => {
+  const state: ViewState = {
+    ...empty,
+    audioEnabled: false,
+    canAnswer: true,
+    live: true,
+  };
+  await relay.publish(state);
+  await page.goto(await relay.viewerURL());
+  const pane = page.getByRole("region", { exact: true, name: "Answer" });
+  const article = pane.locator("article");
+  const requestHint = page.locator("footer").getByText("request answer");
+  await expect(page.getByRole("status")).toHaveText("Session active");
+  await expect(page.getByRole("status").locator("i")).toHaveClass("live");
+  await expect(
+    pane.getByRole("heading", { name: "Press Space to request an answer." })
+  ).toBeVisible();
+  await expect(requestHint).toBeVisible();
+  const first: AnswerCard = {
+    id: "first",
+    language: "English",
+    status: "generating",
+    text: "",
+  };
+  const generating: ViewState = {
+    ...state,
+    answers: [first],
+    selectedID: first.id,
+    selection: 1,
+  };
+  await relay.publish(generating);
+  await expect(page.getByRole("status")).toHaveText("Thinking…");
+  await expect(article).toHaveAttribute("aria-busy", "true");
+  await expect(
+    pane.getByRole("heading", { name: "Preparing your answer…" })
+  ).toBeVisible();
+  await expect(pane).toContainText("Your answer will appear here.");
+  await expect(requestHint).toBeVisible();
+  await relay.publish({
+    ...generating,
+    answers: [{ ...first, text: "# First answer\n\nA streamed explanation." }],
+  });
+  await expect(article).toContainText("A streamed explanation.");
+  await expect(article).toHaveAttribute("aria-busy", "true");
+  const completed: ViewState = {
+    ...generating,
+    answers: [
+      { ...first, status: "complete", text: "# First answer\n\nExplanation." },
+      {
+        id: "second",
+        language: "English",
+        status: "complete",
+        text: "# Second answer",
+      },
+    ],
+    selectedID: "second",
+    selection: 2,
+  };
+  await relay.publish(completed);
+  await expect(page.getByRole("status")).toHaveText("Session active");
+  await expect(article).toHaveAttribute("aria-busy", "false");
+  await expect(article).toContainText("Second answer");
+  await expect(requestHint).toBeVisible();
+  await page.getByRole("button", { name: "Previous answer" }).click();
+  await expect(article).toContainText("First answer");
+  const selection = await readSelection(relay);
+  expect(selection.answerID).toBe("first");
+  await relay.publish({
+    ...completed,
+    selectedID: selection.answerID,
+    selection: 3,
+    selectionRequest: { client: selection.client, id: selection.id },
+  });
+  await expect(page.locator(".position")).toHaveText("1 / 2");
+  await expect(page.getByRole("status")).toHaveText("Session active");
+  await relay.writer.close();
+  await expect(page.getByRole("status")).toHaveText("Mac disconnected");
+  await expect(requestHint).toHaveCount(0);
 });
 
 test("encrypted answers render Markdown safely and expose session status", async ({

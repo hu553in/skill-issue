@@ -366,7 +366,7 @@ const App = () => {
                 if (packet.publisher === null) {
                   setStatus("Mac disconnected");
                 } else {
-                  setStatus(snapshot.live ? "Listening" : "Connected");
+                  setStatus(snapshot.live ? "Session active" : "Connected");
                 }
               }
             })
@@ -544,14 +544,21 @@ const App = () => {
   const sessionEnded = status === "Session ended";
   const needsSignIn = status === signInRequired;
   const viewerFailed = status === failure || needsSignIn;
-  const listening = status === "Listening";
+  const sessionActive = status === "Session active" && state.live;
   const generating =
-    listening && state.answers.some((answer) => answer.status === "generating");
-  const busy = listening && card?.status === "generating";
-  const shownStatus = generating ? "Thinking…" : status;
+    sessionActive &&
+    state.answers.some((answer) => answer.status === "generating");
+  const busy = sessionActive && card?.status === "generating";
+  let shownStatus = status;
+  if (sessionActive) {
+    shownStatus = state.audioEnabled ? "Listening" : "Session active";
+  }
+  if (generating) {
+    shownStatus = "Thinking…";
+  }
   const answerPosition =
     index === -1 ? "No answers yet" : `${index + 1} / ${state.answers.length}`;
-  const canRequest = state.canAnswer && listening;
+  const canRequest = state.canAnswer && sessionActive;
   let recoveryGuide = "Check Settings on your Mac to continue.";
   if (sessionEnded) {
     recoveryGuide = hasAnswer ? restartGuide : "";
@@ -576,7 +583,7 @@ const App = () => {
     answerGuide = "Waiting for the viewer connection.";
   } else if (busy) {
     answerHeading = "Preparing your answer…";
-    answerGuide = "Keep listening. Your answer will appear here.";
+    answerGuide = "Your answer will appear here.";
   } else if (canRequest) {
     answerHeading = "Press Space to request an answer.";
     answerGuide = (
@@ -621,7 +628,7 @@ const App = () => {
           </button>
         </nav>
         <output className="status">
-          <i className={listening ? "live" : ""} />
+          <i className={sessionActive ? "live" : ""} />
           {shownStatus}
         </output>
       </div>

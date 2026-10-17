@@ -12,24 +12,35 @@ final class Capture {
     private var sink: AudioSink?
     private var filter: SCContentFilter?
     private var display: SCDisplay?
+    private var inputs: CaptureInputs?
     private let speech = SpeechEngine()
     private var origin = 0.0
     var seconds: Double {
         max(0, CMTimeGetSeconds(CMClockGetTime(CMClockGetHostTimeClock())) - origin)
     }
 
-    func prepare(progress: @escaping @Sendable (String) -> Void) async throws {
+    func prepare(
+        inputs: CaptureInputs, progress: @escaping @Sendable (String) -> Void
+    ) async throws {
+        try Task.checkCancellation()
+        guard inputs.hasAudio else { return }
         try await speech.prepare(progress: progress)
     }
     func start(
-        microphone: String,
+        inputs: CaptureInputs,
         failed: @escaping @MainActor @Sendable () -> Void
     ) async throws {
         try Task.checkCancellation()
-        let microphoneAllowed = await AVCaptureDevice.requestAccess(for: .audio)
-        try Task.checkCancellation()
-        guard microphoneAllowed else {
-            throw AppFailure.microphonePermission
+        guard inputs.isEnabled else { throw AppFailure.failed }
+        if let microphone = inputs.microphone {
+            if !microphone.isEmpty,
+                AVCaptureDevice(uniqueID: microphone)?.hasMediaType(.audio) != true
+            {
+                throw AppFailure.microphoneUnavailable
+            }
+            let microphoneAllowed = await AVCaptureDevice.requestAccess(for: .audio)
+            try Task.checkCancellation()
+            guard microphoneAllowed else { throw AppFailure.microphonePermission }
         }
         guard CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess() else {
             throw AppFailure.screenCapturePermission
@@ -49,25 +60,22 @@ final class Capture {
             display: display, excludingApplications: own, exceptingWindows: [])
         self.filter = filter
         origin = CMTimeGetSeconds(CMClockGetTime(CMClockGetHostTimeClock()))
+        self.inputs = inputs
         do {
+            guard inputs.hasAudio else { return }
             try await speech.start(failed: { Task { @MainActor in failed() } })
             try Task.checkCancellation()
             let sink = AudioSink(speech: speech, origin: origin, failed: failed)
             self.sink = sink
-            let config = SCStreamConfiguration()
-            config.width = 2
-            config.height = 2
-            config.minimumFrameInterval = CMTime(seconds: 1, preferredTimescale: 600)
-            config.capturesAudio = true
-            config.excludesCurrentProcessAudio = true
-            config.sampleRate = 48000
-            config.channelCount = 1
-            config.captureMicrophone = true
-            if !microphone.isEmpty { config.microphoneCaptureDeviceID = microphone }
-            let stream = SCStream(filter: filter, configuration: config, delegate: sink)
+            let stream = SCStream(
+                filter: filter, configuration: inputs.streamConfiguration(), delegate: sink)
             self.stream = stream
-            try stream.addStreamOutput(sink, type: .audio, sampleHandlerQueue: sink.queue)
-            try stream.addStreamOutput(sink, type: .microphone, sampleHandlerQueue: sink.queue)
+            if inputs.systemAudio {
+                try stream.addStreamOutput(sink, type: .audio, sampleHandlerQueue: sink.queue)
+            }
+            if inputs.microphone != nil {
+                try stream.addStreamOutput(sink, type: .microphone, sampleHandlerQueue: sink.queue)
+            }
             try await stream.startCapture()
             try Task.checkCancellation()
             captureLog.notice("Live capture started")
@@ -79,6 +87,15 @@ final class Capture {
     func freeze() -> AsyncThrowingStream<(Double, [TranscriptSegment]), Error> {
         let origin = origin
         return AsyncThrowingStream { continuation in
+            guard let inputs else {
+                continuation.finish(throwing: AppFailure.failed)
+                return
+            }
+            if !inputs.hasAudio {
+                continuation.yield((seconds, []))
+                continuation.finish()
+                return
+            }
             guard let sink else {
                 continuation.finish(throwing: AppFailure.failed)
                 return
@@ -100,7 +117,9 @@ final class Capture {
             }
         }
     }
-    func screenshot() async throws -> (Data, Double) {
+    func screenshot() async throws -> (Data, Double)? {
+        guard let inputs else { throw AppFailure.failed }
+        guard inputs.screenshots else { return nil }
         guard let filter, let display else { throw AppFailure.failed }
         let config = SCStreamConfiguration()
         let scale = min(1, 1600.0 / Double(display.width))
@@ -116,6 +135,7 @@ final class Capture {
         return (data, seconds)
     }
     func stop() async {
+        inputs = nil
         if let stream { try? await stream.stopCapture() }
         stream = nil
         if let sink {
@@ -127,6 +147,24 @@ final class Capture {
         sink = nil
         filter = nil
         display = nil
+    }
+}
+
+extension CaptureInputs {
+    func streamConfiguration() -> SCStreamConfiguration {
+        let config = SCStreamConfiguration()
+        config.width = 2
+        config.height = 2
+        config.minimumFrameInterval = CMTime(seconds: 1, preferredTimescale: 600)
+        config.capturesAudio = systemAudio
+        config.excludesCurrentProcessAudio = true
+        config.sampleRate = 48000
+        config.channelCount = 1
+        config.captureMicrophone = microphone != nil
+        if let microphone, !microphone.isEmpty {
+            config.microphoneCaptureDeviceID = microphone
+        }
+        return config
     }
 }
 

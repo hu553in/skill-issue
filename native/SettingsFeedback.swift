@@ -27,6 +27,7 @@ struct SettingsHeader: View {
     let status: String
     let working: Bool
     let live: Bool
+    let audioEnabled: Bool
     let answering: Bool
     let canStart: Bool
     let error: String
@@ -57,7 +58,8 @@ struct SettingsHeader: View {
         if warning { return "exclamationmark.triangle.fill" }
         if hasMessage { return "exclamationmark.circle.fill" }
         if answering { return "ellipsis" }
-        return live ? "waveform" : canStart ? "checkmark.circle" : "person.crop.circle"
+        if live { return audioEnabled ? "waveform" : "viewfinder" }
+        return canStart ? "checkmark.circle" : "person.crop.circle"
     }
 
     var body: some View {

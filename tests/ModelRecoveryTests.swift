@@ -415,6 +415,67 @@ struct ModelRecoveryTests {
         await restored.shutdown()
     }
 
+    @Test(arguments: 0..<8)
+    func anyNonemptyInputCombinationCanStart(_ mask: Int) async throws {
+        let http = session(code: "models")
+        defer { http.invalidateAndCancel() }
+        let model = configuredModel(
+            session: http, storage: RecoveryAccountStore(session: tokens()).storage)
+        try await loaded(model)
+        model.selectMicrophone(mask & 1 != 0 ? "" : nil)
+        model.setSystemAudio(mask & 2 != 0)
+        model.setScreenshots(mask & 4 != 0)
+        #expect(model.canStartSession == (mask != 0))
+        #expect(model.sessionUnavailableReason == (mask == 0 ? "Enable at least one input." : nil))
+        if mask == 0 {
+            model.startSession()
+            #expect(!model.working && !model.state.live && model.canConfigureSession)
+        }
+        await model.shutdown()
+    }
+
+    @Test func captureInputsPersistAndStayFixedUntilTheSessionHasStopped() async throws {
+        let http = session(code: "models")
+        defer { http.invalidateAndCancel() }
+        let defaults = TestDefaults()
+        let stored = RecoveryAccountStore(session: tokens())
+        let model = configuredModel(session: http, storage: stored.storage, defaults: defaults)
+        try await loaded(model)
+        model.selectMicrophone(nil)
+        model.setSystemAudio(false)
+        let screenshotOnly = CaptureInputs(microphone: nil, systemAudio: false)
+        #expect(model.captureInputs == screenshotOnly)
+        #expect(CaptureInputs(defaults: defaults) == screenshotOnly)
+        model.state.live = true
+        model.state.audioEnabled = false
+        #expect(model.status == "Session active")
+        model.selectMicrophone("changed")
+        model.setSystemAudio(true)
+        model.setScreenshots(false)
+        #expect(model.captureInputs == screenshotOnly)
+        let stopping = model.endSession()
+        model.selectMicrophone("")
+        model.setSystemAudio(true)
+        model.setScreenshots(false)
+        #expect(!model.canConfigureSession && model.captureInputs == screenshotOnly)
+        await stopping.value
+        #expect(model.canConfigureSession)
+        model.setScreenshots(false)
+        #expect(!model.canStartSession)
+        model.setSystemAudio(true)
+        #expect(model.canStartSession)
+        let audioOnly = CaptureInputs(microphone: nil, screenshots: false)
+        await model.shutdown()
+        model.selectMicrophone("")
+        model.setSystemAudio(false)
+        model.setScreenshots(true)
+        #expect(model.captureInputs == audioOnly)
+        let restored = configuredModel(session: http, storage: stored.storage, defaults: defaults)
+        try await loaded(restored)
+        #expect(restored.captureInputs == audioOnly)
+        await restored.shutdown()
+    }
+
     @Test func editingSuspendsRegistrationsAndReportsAConflictWhenResuming() async throws {
         let shortcuts = RecoveryShortcuts()
         let http = session(code: "models")
@@ -453,6 +514,11 @@ struct ModelRecoveryTests {
         model.startSession()
         #expect(model.working && !model.canConfigureSession && model.canCancelOperation)
         #expect(model.cancelOperationTitle == "Cancel startup" && model.canSelectModel)
+        let inputs = model.captureInputs
+        model.selectMicrophone(nil)
+        model.setSystemAudio(false)
+        model.setScreenshots(false)
+        #expect(model.captureInputs == inputs)
         model.selectLanguage("Russian")
         // Cancel before yielding: no capture or speech preparation can have started.
         model.cancelOperation()

@@ -38,10 +38,15 @@ essential constraints, correctness, and the completeness required by the request
 
 ## Captured observations
 
-`computer` means audio played by the computer, usually the interviewer. `microphone` means the
-candidate's microphone. These are audio sources, not verified identities: echoes, playback and
-multiple remote participants are possible. Timestamps identify captured audio, not the time
-recognition finished. Overlapping time ranges may represent simultaneous speech.
+`computer` means audio played by the computer, usually the interviewer. `microphone` means audio
+captured by the selected microphone, which may pick up the candidate, the interviewer, or both.
+These are audio sources, not verified identities: echoes, playback and multiple participants are
+possible. Timestamps identify captured audio, not the time recognition finished. Overlapping time
+ranges may represent simultaneous speech.
+
+Inputs can be disabled independently. Missing transcript or screenshot content is not evidence of
+silence, an absent participant, or a blank screen. Use the available observations without inventing
+unrecorded speech or unseen screen content.
 
 Transcripts can contain recognition errors, fragments, and repetitions. Recover an obvious misheard
 technical term when context supports it, but do not silently change ambiguous negations, numbers, or

@@ -2339,5 +2339,98 @@
       "The fixed function must return the original matching dictionary when it is first, second, or later in the list; return None for empty input or an absent ID; and leave the list and dictionaries unchanged.",
       "Address the supplied code-review bug without requiring new Java data types, a different function signature, or unrelated infrastructure."
     ]
+  },
+  {
+    "id": "microphone-only-conversation",
+    "title": "Use a microphone-only conversation with more than one speaker",
+    "language": "Russian",
+    "observations": [
+      {
+        "cutoff": 29,
+        "transcript": [
+          {
+            "id": "question",
+            "source": "microphone",
+            "start": 1,
+            "end": 9,
+            "text": "Давай устно, без кода. В Python tuple неизменяемый. Если внутри tuple лежит список, этот список тоже становится неизменяемым?"
+          },
+          {
+            "id": "attempt",
+            "source": "microphone",
+            "start": 11,
+            "end": 17,
+            "text": "Мне кажется, да: раз контейнер неизменяемый, значит вложенные значения тоже защищены."
+          },
+          {
+            "id": "followup",
+            "source": "microphone",
+            "start": 19,
+            "end": 28,
+            "text": "Тогда уточним: есть tuple с одним элементом, списком [1, 2]. Можно ли вызвать append у этого списка и почему? Разбери именно это предположение, код не нужен."
+          }
+        ]
+      }
+    ],
+    "criteria": [
+      "Answer the substantive latest question captured entirely by the microphone. Do not discard it as candidate rehearsal or demand computer audio solely because every segment has the microphone source label.",
+      "Explain that tuple immutability prevents replacing its element references but does not recursively freeze the referenced list; appending to that list is allowed and the list becomes [1, 2, 3] if 3 is appended. No specific appended value is required.",
+      "Correct the recorded assumption that an immutable container makes its contents immutable. Respect the spoken no-code scope and do not invent a screenshot, verified speaker identities, or additional participant speech."
+    ]
+  },
+  {
+    "id": "screenshot-only-first-request",
+    "title": "Solve the first request from a screenshot without any audio history",
+    "language": "Russian",
+    "observations": [
+      {
+        "cutoff": 8,
+        "transcript": [],
+        "screenshot": "images/first-unique.png"
+      }
+    ],
+    "criteria": [
+      "Use the visible first-unique-character task as the current question even though the session contains no transcript or previous answers. Do not require an audio question when the image supplies the task.",
+      "Provide a correct Java static int firstUnique(String s) implementation returning the zero-based index or -1, preserving the stated lowercase English-letter alphabet. Handle leetcode -> 0, loveleetcode -> 2, aabb -> -1, and empty string -> -1.",
+      "Explain O(n) time and O(1) auxiliary space for a fixed 26-letter count array. Answer in Russian with a Java code fence without claiming an observed conversation, candidate authorship, or actual test execution."
+    ]
+  },
+  {
+    "id": "computer-only-unrecorded-answer",
+    "title": "Do not invent a candidate answer absent from computer-only audio",
+    "language": "Russian",
+    "observations": [
+      {
+        "cutoff": 12,
+        "transcript": [
+          {
+            "id": "question",
+            "source": "computer",
+            "start": 1,
+            "end": 11,
+            "text": "Какие гарантии даёт volatile в Java? Делает ли он count++ атомарным?"
+          }
+        ],
+        "answer": "# Гарантии volatile\nvolatile обеспечивает видимость и определённые гарантии порядка, но count++ остаётся составной неатомарной операцией.",
+        "completed": true
+      },
+      {
+        "cutoff": 42,
+        "transcript": [
+          {
+            "id": "assessment",
+            "source": "computer",
+            "start": 34,
+            "end": 41,
+            "text": "Кандидат сейчас закончил отвечать. Повтори, что именно он сказал, и оцени, правильно ли он объяснил volatile."
+          }
+        ]
+      }
+    ],
+    "criteria": [
+      "State briefly that the candidate's actual answer is unavailable in the supplied observations, so it cannot be quoted or assessed. Do not present the earlier assistant suggestion as the candidate's speech. Asking for the missing answer is optional when this limitation is clear.",
+      "Do not conclude that the candidate stayed silent, failed to answer, or answered incorrectly merely because no microphone transcript is present. The available computer audio explicitly says the candidate finished answering.",
+      "Do not invent screen contents, candidate wording, or an assessment of an unheard answer. A concise conditional reminder that volatile does not make count++ atomic is acceptable, but a full volatile tutorial is unnecessary."
+    ]
   }
 ]

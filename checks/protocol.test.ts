@@ -3,7 +3,7 @@ import { expect, mock, test } from "bun:test";
 import { base64 } from "@scure/base";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { safeParse } from "valibot";
+import { parse, safeParse } from "valibot";
 
 import {
   AckPacketSchema,
@@ -13,6 +13,7 @@ import {
   StatePacketSchema,
   ViewStateSchema,
 } from "../protocol";
+import type { ViewState } from "../protocol";
 import { Answer } from "../web/Answer";
 import {
   cancelScroll,
@@ -44,6 +45,8 @@ test("decrypted snapshots reject invalid domain fields without coercion", () => 
     { version: 1 },
     { version: 2 },
     { live: "true" },
+    { audioEnabled: "true" },
+    { audioEnabled: null },
     { canAnswer: "true" },
     { canAnswer: undefined },
     { answers: null },
@@ -87,6 +90,15 @@ test("decrypted snapshots reject invalid domain fields without coercion", () => 
       false
     );
   }
+});
+
+test("snapshots without audio configuration keep their existing listening behavior", () => {
+  const legacy: Partial<ViewState> = { ...empty };
+  delete legacy.audioEnabled;
+  expect(parse(ViewStateSchema, legacy).audioEnabled).toBe(true);
+  expect(
+    parse(ViewStateSchema, { ...empty, audioEnabled: false }).audioEnabled
+  ).toBe(false);
 });
 
 test("protocol schemas preserve ignored extensions and enforce recognized packet bounds", () => {

@@ -3,7 +3,7 @@ import Foundation
 import SimpleKeychain
 
 enum AppFailure: Error {
-    case failed, microphonePermission, screenCapturePermission
+    case failed, microphonePermission, microphoneUnavailable, screenCapturePermission
     case shortcutUnavailable(String)
 
     var message: String {
@@ -12,6 +12,9 @@ enum AppFailure: Error {
         case .microphonePermission:
             return
                 "Allow Skill Issue in System Settings > Privacy & Security > Microphone, then start the session again."
+        case .microphoneUnavailable:
+            return
+                "The selected microphone is unavailable. Choose another microphone or System default."
         case .screenCapturePermission:
             return
                 "Allow Skill Issue in System Settings > Privacy & Security > Screen & System Audio Recording. Quit and reopen the app if macOS asks, then start the session again."
@@ -83,6 +86,7 @@ struct ViewState: Codable, Equatable, Sendable {
     // swiftlint:disable:next unused_declaration
     var version = 3
     var live = false
+    var audioEnabled = true
     var canAnswer = false
     var answers: [AnswerCard] = []
     var selectedID: String?
