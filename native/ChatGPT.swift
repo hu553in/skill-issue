@@ -448,20 +448,24 @@ final class ChatGPT {
         return false
     }
 
+    @discardableResult
     func answer(
         input: [[String: Any]], language: String, model: ChatGPTModel, effort: String,
+        prompt: String? = nil,
         delta: (String) -> Void
-    ) async throws {
+    ) async throws -> [String: Int]? {
         do {
             guard model.supportsEffort(effort) else {
                 throw AppFailure.failed
             }
             let access = try await accessToken()
             try Task.checkCancellation()
-            let prompt = try String(
-                contentsOf: Bundle.module.url(
-                    forResource: "prompt", withExtension: "md", subdirectory: "Resources")!,
-                encoding: .utf8)
+            let prompt =
+                try prompt
+                ?? String(
+                    contentsOf: Bundle.module.url(
+                        forResource: "prompt", withExtension: "md", subdirectory: "Resources")!,
+                    encoding: .utf8)
             var request = URLRequest(url: URL(string: "\(resource)/responses")!)
             request.httpMethod = "POST"
             request.timeoutInterval = 180
@@ -489,6 +493,7 @@ final class ChatGPT {
 
             var completed = false
             var hasText = false
+            var usage: [String: Int]?
             for try await event in ResponseByteChunks(bytes: bytes).asDecodedServerSentEvents() {
                 try Task.checkCancellation()
                 guard let data = event.data,
@@ -504,6 +509,19 @@ final class ChatGPT {
                     delta(text)
                 }
                 if type == "response.completed" {
+                    if let response = body["response"] as? [String: Any],
+                        let counts = response["usage"] as? [String: Any]
+                    {
+                        usage = [
+                            "inputTokens": counts["input_tokens"] as? Int,
+                            "outputTokens": counts["output_tokens"] as? Int,
+                            "reasoningTokens": (counts["output_tokens_details"] as? [String: Any])?[
+                                "reasoning_tokens"] as? Int,
+                            "cachedInputTokens":
+                                (counts["input_tokens_details"] as? [String: Any])?[
+                                    "cached_tokens"] as? Int,
+                        ].compactMapValues { $0 }
+                    }
                     completed = true
                     break
                 }
@@ -514,7 +532,12 @@ final class ChatGPT {
                 }
             }
             guard completed && hasText else { throw AppFailure.failed }
-        } catch is URLError {
+            return usage
+        } catch let error as URLError {
+            #if DEBUG
+                FileHandle.standardError.write(
+                    Data("[chatgpt] Responses network error \(error.code.rawValue)\n".utf8))
+            #endif
             try Task.checkCancellation()
             throw ChatGPTFailure.generic
         }

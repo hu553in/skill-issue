@@ -21,8 +21,8 @@ SOURCE_FILES=()
 NATIVE_FILES=()
 while IFS= read -r source; do
 	SOURCE_FILES+=("$ROOT/$source")
-	# README_SCREENSHOTS tooling has no executable code in the normal app or test binary.
-	if [[ "$source" == native/* && "$source" != native/ReadmeScreenshots.swift ]]; then
+	# Compile-time tooling has no executable code in the normal app or test binary.
+	if [[ "$source" == native/* && "$source" != native/ReadmeScreenshots.swift && "$source" != native/PromptEvaluation.swift ]]; then
 		NATIVE_FILES+=("$ROOT/$source")
 	fi
 done < <(find native tests -type f -name '*.swift' -print | LC_ALL=C sort)

@@ -525,6 +525,37 @@ The generator preserves the original framing and replaces the SVG only after bot
 Repeated runs in an unchanged environment leave the SVG untouched. Native controls and font
 rendering can change with macOS, Chromium or desktop appearance settings.
 
+### Prompt evaluations
+
+Sign in through the app, enable ChatGPT plan usage, then quit the app and keep it closed during the
+run. The evaluator uses that selected saved account and its model settings, including token refresh.
+It consumes the account's usage without starting a session, audio capture, or screen capture.
+
+```sh
+bun eval:prompts --list
+bun eval:prompts
+```
+
+The default run compares the prompt in `HEAD` with the working copy on the same
+[synthetic cases](evals/cases.json). To compare other versions or repeat selected cases:
+
+```sh
+bun eval:prompts --prompt before=git:HEAD~1:native/Resources/prompt.md \
+  --prompt after=native/Resources/prompt.md --case memory-followup,sql-multipart --repeat 2
+```
+
+Each run saves exact prompts, inputs, settings, answers, timing, token usage when available, and a
+blinded model comparison under `.build/prompt-evals/`. Read `report.md` alongside `manifest.json`
+and `results.jsonl`. Model grades need human review; generated code is not automatically executed.
+Fixed inputs make comparisons repeatable, but model outputs can vary. On failure, completed results
+remain available and requests are not retried automatically. Existing output directories are never
+overwritten.
+
+Use `--models` to see the saved account's available models and `--help` for model, effort, output,
+and judging options. The first run builds a separate Swift cache in `.build/prompt-eval`.
+Evaluations are manual and do not run in CI. `bun check` compiles the headless worker without
+accessing an account or making model requests.
+
 ### Releases
 
 Run from a clean `main` checkout tracking `origin/main`, with Node.js satisfying

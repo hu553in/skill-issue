@@ -1320,6 +1320,51 @@ struct ChatGPTTests {
         }
     }
 
+    @Test func evaluationPromptUsesProductionRequestAndReportsUsage() async throws {
+        for hasUsage in [true, false] {
+            var completion: [String: Any] = ["type": "response.completed"]
+            if hasUsage {
+                completion["response"] = [
+                    "usage": [
+                        "input_tokens": 123, "output_tokens": 45,
+                        "input_tokens_details": ["cached_tokens": 100],
+                        "output_tokens_details": ["reasoning_tokens": 20],
+                    ]
+                ]
+            }
+            let end = try JSONSerialization.data(withJSONObject: completion)
+            let stream =
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Answer\"}\n\n"
+                + "data: \(String(decoding: end, as: UTF8.self))\n\n"
+            let server = TestHTTP(stream: [Data(stream.utf8)])
+            let session = MockHTTPProtocol.session(server: server)
+            defer { session.invalidateAndCancel() }
+            let chatGPT = try await configuredChatGPT(session: session)
+            var text = ""
+            let usage = try await chatGPT.answer(
+                input: [["role": "user", "content": "Question"]], language: "Russian",
+                model: try ChatGPTModel(fields: catalogModel("gpt-6-luna")), effort: "low",
+                prompt: "Evaluation variant"
+            ) { text += $0 }
+            #expect(text == "Answer")
+            #expect(
+                usage
+                    == (hasUsage
+                        ? [
+                            "inputTokens": 123, "outputTokens": 45, "cachedInputTokens": 100,
+                            "reasoningTokens": 20,
+                        ] : nil))
+            let request = try #require(server.requests.first)
+            #expect(server.requests.count == 1)
+            #expect(
+                request["instructions"] as? String
+                    == "Evaluation variant\nTrusted session setting: output language is Russian.")
+            #expect(request["store"] as? Bool == false && request["stream"] as? Bool == true)
+            #expect((request["input"] as? [[String: String]])?.first?["content"] == "Question")
+            #expect((request["reasoning"] as? [String: String])?["effort"] == "low")
+        }
+    }
+
     @Test func unfinishedAndFailedEventStreamsRejectCompletionWithoutReplay() async throws {
         let delta = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Partial\"}\n\n"
         let completion = "data: {\"type\":\"response.completed\"}"

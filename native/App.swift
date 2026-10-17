@@ -1214,7 +1214,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // Application entry point called through @main.
     // swiftlint:disable:next unused_declaration
     @MainActor static func main() {
-        #if README_SCREENSHOTS
+        #if PROMPT_EVAL
+            PromptEvaluation.run()
+        #elseif README_SCREENSHOTS
             ReadmeScreenshots.run()
         #else
             let app = NSApplication.shared
