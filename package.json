@@ -86,5 +86,5 @@
   "overrides": {
     "basic-ftp": "^6.2.3"
   },
-  "packageManager": "bun@1.4.3"
+  "packageManager": "bun@1.4.4"
 }
