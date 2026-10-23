@@ -64,7 +64,9 @@ export class Peer {
       this.notify();
     });
     this.socket.on("error", (error) => {
-      this.failure = error;
+      this.failure = new Error(`WebSocket connection failed: ${endpoint}`, {
+        cause: error,
+      });
       this.notify();
     });
   }
