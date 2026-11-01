@@ -48,6 +48,7 @@ jobs:
           name: coverage-web
           path: coverage/lcov.info
           if-no-files-found: ignore
+          overwrite: true
       - if: failure()
         uses: actions/upload-artifact@v7
         with:
@@ -90,7 +91,7 @@ jobs:
         run: brew install swiftlint
       - env:
           CHECK_COMMAND: ${{ matrix.command }}
-        run: bun "${CHECK_COMMAND}"
+        run: bun "$CHECK_COMMAND"
       - if: matrix.command == 'check:swift'
         uses: actions/upload-artifact@v7
         with:
@@ -103,6 +104,7 @@ jobs:
           name: coverage-swift
           path: coverage/swift/lcov.info
           if-no-files-found: ignore
+          overwrite: true
       - if: failure() && matrix.command == 'check:swift'
         uses: actions/upload-artifact@v7
         with:
@@ -112,7 +114,7 @@ jobs:
 
   release:
     needs: [web, swift]
-    if: startsWith(github.ref, 'refs/tags/')
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -128,8 +130,8 @@ jobs:
           bun-version-file: package.json
       - name: Add release installation instructions
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
           CHANGELOG: ${{ steps.release-notes.outputs.changelog }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: bun scripts/release-notes.ts "$RELEASE_TAG" "$CHANGELOG" > "$RUNNER_TEMP/release.md"
       - uses: actions/download-artifact@v8
         with:
@@ -145,19 +147,19 @@ jobs:
   homebrew:
     name: Homebrew
     needs: release
-    if: startsWith(github.ref, 'refs/tags/')
+    if: github.ref_type == 'tag'
     runs-on: macos-26
     permissions:
       contents: read
     steps:
       - uses: Homebrew/actions/setup-homebrew@2026.10.26.1
-      - id: git_setup
+      - id: git-setup
         uses: Homebrew/actions/git-user-config@2026.10.26.1
       - name: Bump Homebrew cask
         env:
           HOMEBREW_GITHUB_API_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          HOMEBREW_GIT_COMMITTER_NAME: ${{ steps.git_setup.outputs.name }}
-          HOMEBREW_GIT_COMMITTER_EMAIL: ${{ steps.git_setup.outputs.email }}
+          HOMEBREW_GIT_COMMITTER_EMAIL: ${{ steps.git-setup.outputs.email }}
+          HOMEBREW_GIT_COMMITTER_NAME: ${{ steps.git-setup.outputs.name }}
         run: |
           : "${HOMEBREW_GITHUB_API_TOKEN:?Set the HOMEBREW_TAP_TOKEN repository secret}"
           brew tap hu553in/tap
