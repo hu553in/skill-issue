@@ -608,7 +608,7 @@ automatically executed.
 
 Use `--models` to see the saved account's available models and `--help` for model, effort, output,
 and judging options. The first run builds a separate Swift cache in `.build/prompt-eval`.
-Evaluations are manual and do not run in CI. `bun check` compiles the headless worker without
+Evaluations are manual and do not run in CI. `bun check:all` compiles the headless worker without
 accessing an account or making model requests.
 
 ### Releases
@@ -656,8 +656,8 @@ Markdown and configuration files. Shell scripts use shfmt and ShellCheck.
 | ------------------- | ------------------------------------------------------------------------------------------ |
 | `bun lint`          | Check formatting and lint without tests                                                    |
 | `bun lint:fix`      | Format and apply lint fixes without tests                                                  |
-| `bun check`         | Run the web and Swift checks                                                               |
-| `bun check:fix`     | Format, apply lint fixes and run `check`                                                   |
+| `bun check:all`     | Run the web and Swift checks                                                               |
+| `bun check:fix`     | Format, apply lint fixes and run `check:all`                                               |
 | `bun check:web`     | Web/relay lint, types, config checks, dependency audit, coverage and Chromium tests        |
 | `bun check:swift`   | Swift lint, coverage, unused-code analysis, Release packaging and native relay integration |
 | `bun test:sanitize` | Run Swift tests with Thread Sanitizer                                                      |
