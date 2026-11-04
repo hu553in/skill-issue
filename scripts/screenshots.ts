@@ -340,7 +340,7 @@ async function frame(png: Buffer, settings: boolean) {
       </style></head><body><img alt="" src="data:image/png;base64,${png.toString("base64")}"></body></html>`);
     const dimensions = await page.locator("img").evaluate(async (img) => {
       if (!(img instanceof HTMLImageElement)) {
-        throw new Error("Missing frame image");
+        throw new TypeError("Missing frame image");
       }
       await img.decode();
       return { height: img.naturalHeight, width: img.naturalWidth };
