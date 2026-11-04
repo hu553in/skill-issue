@@ -244,7 +244,7 @@ test("encrypted history authenticates room, sequence and version", async () => {
     padded.box.slice(0, lastIndex) + alphabet.charAt(last + 1) + suffix;
   // Nonzero unused pad bits represent the same ciphertext to permissive decoders.
   expect(atob(noncanonical)).toBe(atob(padded.box));
-  for (const box of [padded.box.replace(/=+$/u, ""), noncanonical]) {
+  for (const box of [padded.box.replace(/[=]+$/u, ""), noncanonical]) {
     expect(decrypt(key, "room", { ...padded, box })).rejects.toThrow();
   }
   const noCommand = { ...state, command: null };

@@ -43,7 +43,7 @@ for (const cleanupStatus of [200, 503]) {
       if (cleanupStatus === 503) {
         expect(failure).toBeInstanceOf(AggregateError);
         if (!(failure instanceof AggregateError)) {
-          throw new Error("Expected both startup and cleanup errors");
+          throw new TypeError("Expected both startup and cleanup errors");
         }
         expect(failure.errors).toMatchObject([
           handshakeError,

@@ -7,7 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
-import type { CSSProperties, ReactNode } from "react";
+import type { CSSProperties, ReactNode, RefObject } from "react";
 import { createRoot } from "react-dom/client";
 import { parse } from "valibot";
 
@@ -47,6 +47,374 @@ const restartGuide =
 const connectionGuide =
   "Reload this viewer, or reopen it from Skill Issue on your Mac.";
 const signInRequired = "Sign in required";
+interface ViewerConnection {
+  fragment: string;
+  save: () => void;
+  selection: RefObject<AnswerSelection>;
+  sendSelection: RefObject<((request: SelectionCommand) => void) | null>;
+  setSelectedID: (id: string | null) => void;
+  setStatus: (status: string) => void;
+  setUpdate: (update: Update) => void;
+}
+// Socket state lives outside React: these locals change from socket callbacks, not renders.
+function connectViewer({
+  fragment,
+  save,
+  selection,
+  sendSelection,
+  setSelectedID,
+  setStatus,
+  setUpdate,
+}: ViewerConnection): () => void {
+  let socket: ReconnectingWebSocket | undefined;
+  let disposed = false;
+  let ended = false;
+  let established = false;
+  let generation = 0;
+  let highest = 0;
+  let started = Date.now();
+  let lastReceived = started;
+  let accessProbe: AbortController | undefined;
+  function disconnect() {
+    selection.current.disconnect();
+    sendSelection.current = null;
+  }
+  async function checkAccess() {
+    // Failed upgrades belong to the same interruption. Let one bounded probe
+    // finish; only a restored socket or a new viewer link makes it stale.
+    if (accessProbe) {
+      return;
+    }
+    const probe = new AbortController();
+    accessProbe = probe;
+    try {
+      // The root is an existing asset, so a denial belongs to deployment
+      // access rather than the room. No session secrets enter this request.
+      const response = await fetch(new URL("/", location.origin), {
+        cache: "no-store",
+        credentials: "same-origin",
+        redirect: "manual",
+        referrerPolicy: "no-referrer",
+        signal: AbortSignal.any([probe.signal, AbortSignal.timeout(5000)]),
+      });
+      if (
+        !disposed &&
+        !ended &&
+        !probe.signal.aborted &&
+        (response.type === "opaqueredirect" ||
+          response.status === 401 ||
+          response.status === 403)
+      ) {
+        generation += 1;
+        ended = true;
+        disconnect();
+        setStatus(signInRequired);
+        socket?.close();
+      }
+    } catch {
+      /* Offline and temporary server failures retain ordinary reconnect. */
+    } finally {
+      if (accessProbe === probe) {
+        accessProbe = undefined;
+      }
+    }
+  }
+  async function connect() {
+    try {
+      const { room, token, key: rawKey } = parseLink(fragment);
+      const key = await crypto.subtle.importKey(
+        "raw",
+        Uint8Array.from(base64urlnopad.decode(rawKey)),
+        "AES-GCM",
+        false,
+        ["decrypt", "encrypt"]
+      );
+      if (disposed || ended) {
+        return;
+      }
+      const url = new URL(`/rooms/${room}/socket`, location.origin);
+      url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+      const ws = new ReconnectingWebSocket(
+        url.href,
+        ["skill-issue", `skill-issue.reader.${token}`],
+        {
+          maxEnqueuedMessages: 0,
+          minReconnectionDelay: 1500,
+          shouldReconnectOnClose: (event) =>
+            !disposed && !ended && event.code !== 1008,
+        }
+      );
+      socket = ws;
+      let queue = Promise.resolve();
+      let sending = Promise.resolve();
+      let client = "";
+      let first = true;
+      ws.addEventListener("open", () => {
+        accessProbe?.abort();
+        generation += 1;
+        queue = Promise.resolve();
+        sending = Promise.resolve();
+        client = "";
+        first = true;
+        lastReceived = Date.now();
+      });
+      ws.addEventListener("message", (event: MessageEvent<unknown>) => {
+        if (disposed || ended) {
+          return;
+        }
+        const run = generation;
+        lastReceived = Date.now();
+        let packet: ReturnType<typeof parseViewerMessage>;
+        try {
+          if (typeof event.data !== "string") {
+            throw new TypeError(failure);
+          }
+          packet = parseViewerMessage(JSON.parse(event.data));
+          if (packet?.type === "ended") {
+            // Close the transport while retaining final snapshots already in the queue.
+            ended = true;
+            disconnect();
+            setStatus("Session ended");
+            ws.close();
+            return;
+          }
+        } catch {
+          generation += 1;
+          ended = true;
+          disconnect();
+          setStatus(failure);
+          ws.close();
+          return;
+        }
+        if (!packet) {
+          return;
+        }
+        const deliver = async () => {
+          if (disposed || run !== generation) {
+            return;
+          }
+          if (packet.type === "ready") {
+            ({ client } = packet);
+            sendSelection.current = (request) => {
+              const current = () =>
+                !disposed &&
+                !ended &&
+                run === generation &&
+                ws.readyState === WebSocket.OPEN &&
+                selection.current.publisher === request.publisher;
+              const send = async () => {
+                if (!current()) {
+                  return;
+                }
+                const message = await selectAnswer(key, room, client, request);
+                if (current()) {
+                  ws.send(message);
+                }
+              };
+              // Encryption is asynchronous; retain the order of rapid taps.
+              sending = sending.then(send).catch(() => {
+                if (current()) {
+                  ws.reconnect();
+                }
+              });
+            };
+            established = true;
+            if (!ended && ws.readyState === WebSocket.OPEN) {
+              setStatus("Connected");
+            }
+            return;
+          }
+          if (packet.type === "offline") {
+            selection.current.disconnect();
+            if (!ended && ws.readyState === WebSocket.OPEN) {
+              setStatus("Mac disconnected");
+            }
+            return;
+          }
+          if (packet.type !== "state") {
+            return;
+          }
+          const { seq } = packet;
+          if (seq < highest) {
+            return;
+          }
+          const snapshot = await decrypt(key, room, packet);
+          if (disposed || run !== generation) {
+            return;
+          }
+          const publisher = !ended && snapshot.live ? packet.publisher : null;
+          const reconnect = first || publisher !== selection.current.publisher;
+          first = false;
+          highest = seq;
+          save();
+          selection.current.receive(snapshot, publisher, client);
+          setSelectedID(selection.current.selectedID);
+          await new Promise<void>((resolve) => {
+            setUpdate({
+              applied: (appliedCommand) => {
+                if (
+                  disposed ||
+                  ended ||
+                  run !== generation ||
+                  selection.current.selectedID !== (snapshot.selectedID ?? null)
+                ) {
+                  resolve();
+                  return;
+                }
+                const acknowledge = async () => {
+                  const ack = await acknowledgment(
+                    key,
+                    room,
+                    client,
+                    seq,
+                    appliedCommand
+                  );
+                  if (
+                    !disposed &&
+                    !ended &&
+                    run === generation &&
+                    ws.readyState === WebSocket.OPEN
+                  ) {
+                    ws.send(ack);
+                  }
+                };
+                void acknowledge().catch(() => {
+                  /* A disconnected peer cannot receive acknowledgment. */
+                });
+                resolve();
+              },
+              reconnect,
+              state: snapshot,
+            });
+          });
+          if (
+            !disposed &&
+            !ended &&
+            run === generation &&
+            ws.readyState === WebSocket.OPEN
+          ) {
+            if (packet.publisher === null) {
+              setStatus("Mac disconnected");
+            } else {
+              setStatus(snapshot.live ? "Session active" : "Connected");
+            }
+          }
+        };
+        queue = queue.then(deliver).catch(() => {
+          if (!disposed && !ended && run === generation) {
+            generation += 1;
+            ended = true;
+            disconnect();
+            setStatus(failure);
+            ws.close();
+          }
+        });
+      });
+      ws.addEventListener("close", (event) => {
+        if (disposed || ended) {
+          return;
+        }
+        generation += 1;
+        disconnect();
+        if (event.code === 1008) {
+          ended = true;
+          setStatus(failure);
+          return;
+        }
+        if (established) {
+          established = false;
+          started = Date.now();
+        }
+        setStatus("Reconnecting…");
+        void checkAccess();
+      });
+    } catch {
+      if (!disposed) {
+        ended = true;
+        disconnect();
+        setStatus(failure);
+      }
+    }
+  }
+  void connect();
+  const watchdog = setInterval(() => {
+    if (
+      !disposed &&
+      !ended &&
+      document.visibilityState === "visible" &&
+      Date.now() - (established ? lastReceived : started) > 35_000
+    ) {
+      if (established) {
+        socket?.reconnect();
+      } else {
+        // Rejected upgrades expose no HTTP status to the browser. Bound each
+        // establishment without assuming why it failed or admitting a socket.
+        generation += 1;
+        ended = true;
+        disconnect();
+        setStatus(failure);
+        socket?.close();
+      }
+    }
+  }, 10_000);
+  const visibility = () => {
+    if (
+      document.visibilityState === "visible" &&
+      !ended &&
+      socket?.readyState === WebSocket.CLOSED
+    ) {
+      socket.reconnect();
+    }
+  };
+  document.addEventListener("visibilitychange", visibility);
+  return () => {
+    disposed = true;
+    disconnect();
+    accessProbe?.abort();
+    clearInterval(watchdog);
+    document.removeEventListener("visibilitychange", visibility);
+    socket?.close();
+  };
+}
+function holdWakeLock(keepAwake: boolean): () => void {
+  let disposed = false;
+  let lock: WakeLockSentinel | undefined;
+  let requesting = false;
+  const acquire = async () => {
+    if (
+      !keepAwake ||
+      document.visibilityState !== "visible" ||
+      !("wakeLock" in navigator) ||
+      requesting ||
+      (lock && !lock.released)
+    ) {
+      return;
+    }
+    requesting = true;
+    try {
+      const next = await navigator.wakeLock.request("screen");
+      if (disposed) {
+        await next.release();
+      } else {
+        lock = next;
+      }
+    } catch {
+      /* Best effort when browser or battery policy denies it. */
+    } finally {
+      requesting = false;
+    }
+  };
+  void acquire();
+  const visibility = () => {
+    void acquire();
+  };
+  document.addEventListener("visibilitychange", visibility);
+  return () => {
+    disposed = true;
+    document.removeEventListener("visibilitychange", visibility);
+    void lock?.release();
+  };
+}
 const App = () => {
   const [update, setUpdate] = useState<Update>({
     applied: () => {
@@ -132,319 +500,15 @@ const App = () => {
     if (!fragment) {
       return;
     }
-    let socket: ReconnectingWebSocket | undefined;
-    let disposed = false;
-    let ended = false;
-    let established = false;
-    let generation = 0;
-    let highest = 0;
-    let started = Date.now();
-    let lastReceived = started;
-    let accessProbe: AbortController | undefined;
-    function disconnect() {
-      selection.current.disconnect();
-      sendSelection.current = null;
-    }
-    async function checkAccess() {
-      // Failed upgrades belong to the same interruption. Let one bounded probe
-      // finish; only a restored socket or a new viewer link makes it stale.
-      if (accessProbe) {
-        return;
-      }
-      const probe = new AbortController();
-      accessProbe = probe;
-      try {
-        // The root is an existing asset, so a denial belongs to deployment
-        // access rather than the room. No session secrets enter this request.
-        const response = await fetch(new URL("/", location.origin), {
-          cache: "no-store",
-          credentials: "same-origin",
-          redirect: "manual",
-          referrerPolicy: "no-referrer",
-          signal: AbortSignal.any([probe.signal, AbortSignal.timeout(5000)]),
-        });
-        if (
-          !disposed &&
-          !ended &&
-          !probe.signal.aborted &&
-          (response.type === "opaqueredirect" ||
-            response.status === 401 ||
-            response.status === 403)
-        ) {
-          generation += 1;
-          ended = true;
-          disconnect();
-          setStatus(signInRequired);
-          socket?.close();
-        }
-      } catch {
-        /* Offline and temporary server failures retain ordinary reconnect. */
-      } finally {
-        if (accessProbe === probe) {
-          accessProbe = undefined;
-        }
-      }
-    }
-    async function connect() {
-      try {
-        const { room, token, key: rawKey } = parseLink(fragment);
-        const key = await crypto.subtle.importKey(
-          "raw",
-          Uint8Array.from(base64urlnopad.decode(rawKey)),
-          "AES-GCM",
-          false,
-          ["decrypt", "encrypt"]
-        );
-        if (disposed || ended) {
-          return;
-        }
-        const url = new URL(`/rooms/${room}/socket`, location.origin);
-        url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-        const ws = new ReconnectingWebSocket(
-          url.href,
-          ["skill-issue", `skill-issue.reader.${token}`],
-          {
-            maxEnqueuedMessages: 0,
-            minReconnectionDelay: 1500,
-            shouldReconnectOnClose: (event) =>
-              !disposed && !ended && event.code !== 1008,
-          }
-        );
-        socket = ws;
-        let queue = Promise.resolve();
-        let sending = Promise.resolve();
-        let client = "";
-        let first = true;
-        ws.addEventListener("open", () => {
-          accessProbe?.abort();
-          generation += 1;
-          queue = Promise.resolve();
-          sending = Promise.resolve();
-          client = "";
-          first = true;
-          lastReceived = Date.now();
-        });
-        ws.addEventListener("message", (event: MessageEvent<unknown>) => {
-          if (disposed || ended) {
-            return;
-          }
-          const run = generation;
-          lastReceived = Date.now();
-          let packet: ReturnType<typeof parseViewerMessage>;
-          try {
-            if (typeof event.data !== "string") {
-              throw new TypeError(failure);
-            }
-            packet = parseViewerMessage(JSON.parse(event.data));
-            if (packet?.type === "ended") {
-              // Close the transport while retaining final snapshots already in the queue.
-              ended = true;
-              disconnect();
-              setStatus("Session ended");
-              ws.close();
-              return;
-            }
-          } catch {
-            generation += 1;
-            ended = true;
-            disconnect();
-            setStatus(failure);
-            ws.close();
-            return;
-          }
-          if (!packet) {
-            return;
-          }
-          queue = queue
-            .then(async () => {
-              if (disposed || run !== generation) {
-                return;
-              }
-              if (packet.type === "ready") {
-                ({ client } = packet);
-                sendSelection.current = (request) => {
-                  const current = () =>
-                    !disposed &&
-                    !ended &&
-                    run === generation &&
-                    ws.readyState === WebSocket.OPEN &&
-                    selection.current.publisher === request.publisher;
-                  // Encryption is asynchronous; retain the order of rapid taps.
-                  sending = sending
-                    .then(async () => {
-                      if (!current()) {
-                        return;
-                      }
-                      const message = await selectAnswer(
-                        key,
-                        room,
-                        client,
-                        request
-                      );
-                      if (current()) {
-                        ws.send(message);
-                      }
-                    })
-                    .catch(() => {
-                      if (current()) {
-                        ws.reconnect();
-                      }
-                    });
-                };
-                established = true;
-                if (!ended && ws.readyState === WebSocket.OPEN) {
-                  setStatus("Connected");
-                }
-                return;
-              }
-              if (packet.type === "offline") {
-                selection.current.disconnect();
-                if (!ended && ws.readyState === WebSocket.OPEN) {
-                  setStatus("Mac disconnected");
-                }
-                return;
-              }
-              if (packet.type !== "state") {
-                return;
-              }
-              const { seq } = packet;
-              if (seq < highest) {
-                return;
-              }
-              const snapshot = await decrypt(key, room, packet);
-              if (disposed || run !== generation) {
-                return;
-              }
-              const publisher =
-                !ended && snapshot.live ? packet.publisher : null;
-              const reconnect =
-                first || publisher !== selection.current.publisher;
-              first = false;
-              highest = seq;
-              save();
-              selection.current.receive(snapshot, publisher, client);
-              setSelectedID(selection.current.selectedID);
-              await new Promise<void>((resolve) => {
-                setUpdate({
-                  applied: (appliedCommand) => {
-                    if (
-                      disposed ||
-                      ended ||
-                      run !== generation ||
-                      selection.current.selectedID !==
-                        (snapshot.selectedID ?? null)
-                    ) {
-                      resolve();
-                      return;
-                    }
-                    void acknowledgment(key, room, client, seq, appliedCommand)
-                      .then((ack) => {
-                        if (
-                          !disposed &&
-                          !ended &&
-                          run === generation &&
-                          ws.readyState === WebSocket.OPEN
-                        ) {
-                          ws.send(ack);
-                        }
-                      })
-                      .catch(() => {
-                        /* A disconnected peer cannot receive acknowledgment. */
-                      });
-                    resolve();
-                  },
-                  reconnect,
-                  state: snapshot,
-                });
-              });
-              if (
-                !disposed &&
-                !ended &&
-                run === generation &&
-                ws.readyState === WebSocket.OPEN
-              ) {
-                if (packet.publisher === null) {
-                  setStatus("Mac disconnected");
-                } else {
-                  setStatus(snapshot.live ? "Session active" : "Connected");
-                }
-              }
-            })
-            .catch(() => {
-              if (!disposed && !ended && run === generation) {
-                generation += 1;
-                ended = true;
-                disconnect();
-                setStatus(failure);
-                ws.close();
-              }
-            });
-        });
-        ws.addEventListener("close", (event) => {
-          if (disposed || ended) {
-            return;
-          }
-          generation += 1;
-          disconnect();
-          if (event.code === 1008) {
-            ended = true;
-            setStatus(failure);
-            return;
-          }
-          if (established) {
-            established = false;
-            started = Date.now();
-          }
-          setStatus("Reconnecting…");
-          void checkAccess();
-        });
-      } catch {
-        if (!disposed) {
-          ended = true;
-          disconnect();
-          setStatus(failure);
-        }
-      }
-    }
-    void connect();
-    const watchdog = setInterval(() => {
-      if (
-        !disposed &&
-        !ended &&
-        document.visibilityState === "visible" &&
-        Date.now() - (established ? lastReceived : started) > 35_000
-      ) {
-        if (established) {
-          socket?.reconnect();
-        } else {
-          // Rejected upgrades expose no HTTP status to the browser. Bound each
-          // establishment without assuming why it failed or admitting a socket.
-          generation += 1;
-          ended = true;
-          disconnect();
-          setStatus(failure);
-          socket?.close();
-        }
-      }
-    }, 10_000);
-    const visibility = () => {
-      if (
-        document.visibilityState === "visible" &&
-        !ended &&
-        socket?.readyState === WebSocket.CLOSED
-      ) {
-        socket.reconnect();
-      }
-    };
-    document.addEventListener("visibilitychange", visibility);
-    return () => {
-      disposed = true;
-      disconnect();
-      accessProbe?.abort();
-      clearInterval(watchdog);
-      document.removeEventListener("visibilitychange", visibility);
-      socket?.close();
-    };
+    return connectViewer({
+      fragment,
+      save,
+      selection,
+      sendSelection,
+      setSelectedID,
+      setStatus,
+      setUpdate,
+    });
   }, [fragment, save]);
   useLayoutEffect(() => {
     if (state === empty) {
@@ -483,45 +547,7 @@ const App = () => {
       sendSelection.current?.(request);
     }
   };
-  useEffect(() => {
-    let disposed = false;
-    let lock: WakeLockSentinel | undefined;
-    let requesting = false;
-    const acquire = async () => {
-      if (
-        !keepAwake ||
-        document.visibilityState !== "visible" ||
-        !("wakeLock" in navigator) ||
-        requesting ||
-        (lock && !lock.released)
-      ) {
-        return;
-      }
-      requesting = true;
-      try {
-        const next = await navigator.wakeLock.request("screen");
-        if (disposed) {
-          await next.release();
-        } else {
-          lock = next;
-        }
-      } catch {
-        /* Best effort when browser or battery policy denies it. */
-      } finally {
-        requesting = false;
-      }
-    };
-    void acquire();
-    const visibility = () => {
-      void acquire();
-    };
-    document.addEventListener("visibilitychange", visibility);
-    return () => {
-      disposed = true;
-      document.removeEventListener("visibilitychange", visibility);
-      void lock?.release();
-    };
-  }, [keepAwake]);
+  useEffect(() => holdWakeLock(keepAwake), [keepAwake]);
 
   if (!fragment) {
     return (
