@@ -34,8 +34,10 @@ fi
 {
 	xcrun swift --version
 	xcrun --find swiftc
-	xcrun --show-sdk-path
-	xcrun --show-sdk-version
+	# SwiftPM builds against the macosx SDK. Without --sdk, xcrun picks the SDK matching the host
+	# macOS version, which can belong to the Command Line Tools rather than the selected Xcode.
+	xcrun --sdk macosx --show-sdk-path
+	xcrun --sdk macosx --show-sdk-version
 	# Metal's cryptex mount can change after a reboot.
 	xcrun --find metal
 	printf '%s\n' "${SDKROOT:-}" "${DEVELOPER_DIR:-}" "${FLAGS[@]}" "${SOURCE_FILES[@]}"
