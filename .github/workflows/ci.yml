@@ -152,9 +152,9 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: Homebrew/actions/setup-homebrew@2026.11.09.1
+      - uses: Homebrew/actions/setup-homebrew@2026.11.14.1
       - id: git-setup
-        uses: Homebrew/actions/git-user-config@2026.11.09.1
+        uses: Homebrew/actions/git-user-config@2026.11.14.1
       - name: Bump Homebrew cask
         env:
           HOMEBREW_GITHUB_API_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
