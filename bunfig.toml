@@ -1,3 +1,2 @@
 [install]
-# Matches the Renovate minimumReleaseAge (3 days), so lockfile maintenance waits too.
 minimumReleaseAge = 259200

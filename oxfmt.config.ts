@@ -5,7 +5,6 @@ export default defineConfig({
   ...ultracite,
   ignorePatterns: ["**/worker-configuration.d.ts", ".codex/environments/**"],
   overrides: [
-    ...(ultracite.overrides ?? []),
     {
       files: ["**/*.md", "**/*.yml", "**/*.yaml"],
       options: {

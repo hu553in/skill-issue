@@ -10,7 +10,7 @@ let package = Package(
         .package(url: "https://github.com/auth0/SimpleKeychain", exact: "1.3.0"),
         .package(
             url: "https://github.com/soniqo/speech-swift.git",
-            revision: "cbcdfc6be5e723952d29ab6e32af5e22ad8e70fa"),
+            exact: "0.0.29"),
     ],
     targets: [
         .executableTarget(

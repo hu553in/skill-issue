@@ -41,7 +41,7 @@ export class RelaySession {
     if (!response.ok) {
       throw new Error(`Room creation failed: ${response.status}`);
     }
-    const room = (await response.json()) as RoomCredentials;
+    const room = await response.json<RoomCredentials>();
     const key = await crypto.subtle.generateKey(
       { length: 256, name: "AES-GCM" },
       true,

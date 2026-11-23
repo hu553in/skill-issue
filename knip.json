@@ -10,5 +10,5 @@
     "diff",
     "swiftc"
   ],
-  "ignoreDependencies": ["@commitlint/cli", "cloudflare", "renovate"]
+  "ignoreDependencies": ["@commitlint/cli", "cloudflare"]
 }

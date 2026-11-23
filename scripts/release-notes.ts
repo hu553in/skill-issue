@@ -69,7 +69,7 @@ Keep the session stopped until the app and Worker both use **${tag}**.
 
    \`\`\`sh
    bun ci
-   bunx wrangler login
+   bun run wrangler login
    \`\`\`
 
 2. Set \`name\` in \`wrangler.jsonc\` to your Worker name. For an update, use the same Cloudflare account and Worker name, and [keep your Worker settings](${readme}#keep-your-worker-settings). Retain any variables, domains and routes you need, and disconnect Git builds before deploying.

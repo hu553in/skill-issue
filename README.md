@@ -140,7 +140,7 @@ its commands download the matching tag.
 
    ```sh
    bun ci
-   bunx wrangler login
+   bun run wrangler login
    ```
 
 2. Choose the Worker `name` in `wrangler.jsonc`. For an update, sign in to the same Cloudflare
@@ -684,8 +684,7 @@ SKILL_ISSUE_ASR_CHECK_DIR=/path/to/fixtures bun test:asr
 ```
 
 The speech library and model are pinned; updates require real-model validation. Model updates must
-also update manifest sizes and hashes and [THIRD_PARTY.md](THIRD_PARTY.md). Renovate updates Bun
-dependencies, versioned Swift packages and GitHub Actions.
+also update manifest sizes and hashes and [THIRD_PARTY.md](THIRD_PARTY.md).
 
 ### Troubleshooting
 
