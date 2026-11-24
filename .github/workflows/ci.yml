@@ -76,7 +76,8 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: package.json
-      - run: bun ci
+      - if: matrix.command == 'check:swift'
+        run: bun ci
       - run: |
           xcodebuild -version
           swift --version

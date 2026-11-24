@@ -44,7 +44,7 @@ test("release instructions pin the app, source and Bun while preserving the chan
       "https://github.com/hu553in/skill-issue/tree/v2.3.4"
     );
     expect(valid.stdout).toContain(
-      "| Build variable `BUN_VERSION` | `1.2.3` |"
+      "[Bun 1.2.3](https://bun.sh/docs/installation#installing-older-versions)"
     );
     expect(valid.stdout).toContain(
       "git clone --branch v2.3.4 --depth 1 https://github.com/hu553in/skill-issue.git skill-issue-v2.3.4"

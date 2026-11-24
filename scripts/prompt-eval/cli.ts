@@ -114,7 +114,6 @@ async function startWorker() {
   }
   const interrupt = () => {
     // EOF also releases the native worker's blocking readLine while it is idle.
-    // oxlint-disable-next-line promise/prefer-await-to-then -- Signal callbacks cannot wait for stdin before delivering SIGTERM.
     void endInput().catch(() => {
       // A worker that has already exited may have closed stdin first.
     });

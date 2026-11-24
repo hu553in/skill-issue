@@ -47,7 +47,6 @@ The button selects **${tag}** and creates a repository in your GitHub account.
    | Build command | Clear this field |
    | Deploy command | \`bun deploy\` |
    | Preview builds | Off |
-   | Build variable \`BUN_VERSION\` | \`${bunVersion}\` |
 
    The detected Build command also compiles the macOS app and requires Xcode. Leave it empty; \`bun deploy\` builds the viewer before publishing the Worker.
 

@@ -23,8 +23,6 @@ export default defineConfig({
         "jsx-a11y/no-noninteractive-tabindex": "off",
         // Preserve ordered snapshot application in the socket event callback.
         "promise/avoid-new": "off",
-        "promise/no-nesting": "off",
-        "promise/prefer-await-to-then": "off",
         // Reset viewer state when the external session link changes.
         "react/set-state-in-effect": "off",
         // React effects return cleanup only when the session was started.
@@ -75,7 +73,5 @@ export default defineConfig({
     // Shared protocol helpers keep named, hoisted functions.
     "func-style": "off",
     "no-use-before-define": ["error", { functions: false }],
-    // React Compiler is not enabled in this Vite build.
-    "react/todo": "off",
   },
 });

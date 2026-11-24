@@ -1,3 +1,5 @@
+lefthook: bunx --minimum-release-age 259200 lefthook
+
 output:
   - execution
   - failure
@@ -6,10 +8,10 @@ commit-msg:
   commands:
     commitlint:
       run: >-
-        bunx --minimum-release-age 259200 --silent --package @commitlint/cli@latest commitlint
-        --default-config --strict --edit {1}
+        bunx --bun --minimum-release-age 259200 --silent --package @commitlint/cli@latest commitlint
+        --default-config --strict --edit '{1}'
 
 pre-commit:
   jobs:
-    - run: bun check:fix
+    - run: bun lint:fix && bun check:web:local && bun check:swift:local
       stage_fixed: true

@@ -622,9 +622,9 @@ For a patch release:
 bun release:patch
 ```
 
-Use `bun release:minor` or `bun release:major` instead for a larger version change. Release It!
-updates `package.json` and creates the release commit, running `bun check:fix` through the
-pre-commit hook. After the commit succeeds, it creates the annotated `vX.Y.Z` tag and pushes both.
+Use `bun release:minor` or `bun release:major` for a larger version change. Release It! updates
+`package.json` and creates the release commit after the pre-commit checks pass. It then creates the
+annotated `vX.Y.Z` tag and pushes both.
 
 After the web, Swift and sanitizer checks pass, CI publishes the ZIP and generated release notes.
 The notes include a Deploy to Cloudflare button pinned to the tag, the Bun version and source
@@ -648,9 +648,9 @@ Read and write**.
 
 ### Checks
 
-Swift uses `swift format`, SwiftLint and compiler warnings as errors. Web code uses
-Ultracite/Oxlint/Oxfmt, type-aware linting, TypeScript, Stylelint and Knip. Oxfmt also formats
-Markdown and configuration files. Shell scripts use shfmt and ShellCheck.
+Swift uses `swift format`, SwiftLint and compiler warnings as errors. Web checks use type-aware
+Oxlint with Ultracite rules, TypeScript, Stylelint and Knip. Bun fmt formats web code, Markdown and
+configuration files. Shell scripts use shfmt and ShellCheck.
 
 | Command             | Purpose                                                                                    |
 | ------------------- | ------------------------------------------------------------------------------------------ |
@@ -662,9 +662,10 @@ Markdown and configuration files. Shell scripts use shfmt and ShellCheck.
 | `bun check:swift`   | Swift lint, coverage, unused-code analysis, Release packaging and native relay integration |
 | `bun test:sanitize` | Run Swift tests with Thread Sanitizer                                                      |
 
-The pre-commit hook runs `check:fix`, which can change files. Commit messages use Conventional
-Commits. [CI](https://github.com/hu553in/skill-issue/actions/workflows/ci.yml) runs the web, Swift
-and sanitizer checks. Coverage reports go into `coverage/`.
+The pre-commit hook applies lint fixes and runs the web and Swift checks through coverage. Commit
+messages use Conventional Commits.
+[CI](https://github.com/hu553in/skill-issue/actions/workflows/ci.yml) runs the full web and Swift
+checks and Thread Sanitizer. Coverage reports go into `coverage/`.
 
 Integration tests use a disposable local Worker without ChatGPT credentials or capture permissions.
 Native integration tests check CryptoKit/WebCrypto interoperability through the relay. Real capture,

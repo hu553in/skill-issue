@@ -11,7 +11,5 @@ Thumbs.db
 !.env.example
 !.env.example.*
 coverage/
-playwright-report/
 test-results/
 worker-configuration.d.ts
-.swiftlint-cache/

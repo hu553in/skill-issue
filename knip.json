@@ -1,14 +1,6 @@
 {
   "$schema": "./node_modules/knip/schema.json",
   "entry": ["web/main.tsx"],
-  "ignoreBinaries": [
-    "brew",
-    "shfmt",
-    "swift",
-    "swiftlint",
-    "plutil",
-    "diff",
-    "swiftc"
-  ],
-  "ignoreDependencies": ["@commitlint/cli", "cloudflare"]
+  "ignoreBinaries": ["brew", "shfmt", "swift", "swiftlint", "diff", "swiftc"],
+  "ignoreDependencies": ["@commitlint/cli"]
 }
