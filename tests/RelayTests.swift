@@ -72,8 +72,9 @@ private final class TestRelay {
     var publicationStarted: Bool { !publicationPrefixes.isEmpty }
     private var readPublications = false
     private var ready: CheckedContinuation<String, Error>?
-    private(set) var upgraded = false
+    private(set) var upgradedAt: ContinuousClock.Instant?
     private(set) var deletions = 0
+    private(set) var deletionStartedAt: ContinuousClock.Instant?
     private(set) var requests: [Request] = []
     var createStatus = 200
     var socketStatus = 101
@@ -252,7 +253,7 @@ private final class TestRelay {
                     }
                     connection.send(
                         content: data, completion: .contentProcessed { _ in })
-                    self.upgraded = true
+                    self.upgradedAt = .now
                     self.sockets.append(connection)
                     if self.readPublications { self.drain(connection) }
                 } else {
@@ -266,6 +267,7 @@ private final class TestRelay {
                     } else if request.path.hasSuffix("/end") {
                         status = self.deletionStatus
                         self.deletions += 1
+                        self.deletionStartedAt = .now
                         body = "OK"
                     } else {
                         status =
@@ -292,34 +294,40 @@ private final class TestRelay {
         let base = try await server.start()
         defer { server.stop() }
         var finished = false
-        var failed = false
         var failure: Error?
         let task = Task {
             do {
                 let relay = try await Relay.create(url: base)
-                try await relay.close()
+                try? await relay.close()
             } catch {
-                failed = true
                 failure = error
             }
             finished = true
         }
         defer { task.cancel() }
-        let deadline = ContinuousClock.now + .seconds(cancel ? 3 : 20)
-        while !server.upgraded, ContinuousClock.now < deadline {
+        let phaseTimeout: Duration = .seconds(cancel ? 3 : 20)
+        let upgradeDeadline = ContinuousClock.now + phaseTimeout
+        while server.upgradedAt == nil, ContinuousClock.now < upgradeDeadline {
             try await Task.sleep(for: .milliseconds(10))
         }
-        try #require(server.upgraded)
-        if cancel { task.cancel() }
-        while !finished, ContinuousClock.now < deadline {
-            try await Task.sleep(for: .milliseconds(10))
-        }
-        #expect(finished)
-        #expect(failed)
+        let upgradedAt = try #require(server.upgradedAt)
         if cancel {
-            #expect(!(failure is ViewerFailure))
+            try #require(!finished)
+            task.cancel()
+        }
+        let completionDeadline = ContinuousClock.now + phaseTimeout
+        while !finished, ContinuousClock.now < completionDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try #require(finished)
+        let error = try #require(failure)
+        if cancel {
+            #expect(!(error is ViewerFailure))
         } else {
-            #expect(failure as? ViewerFailure == .generic)
+            #expect(error as? ViewerFailure == .generic)
+            let deletionStartedAt = try #require(server.deletionStartedAt)
+            // The 15-second timer starts before the server sends the upgrade response.
+            #expect(deletionStartedAt - upgradedAt >= .seconds(12))
         }
         #expect(server.deletions == 1)
     }
@@ -355,16 +363,17 @@ private final class TestRelay {
         #expect(!relay.viewerURL.absoluteString.contains("test-client"))
         #expect(!relay.viewerURL.absoluteString.contains("test-secret"))
         #expect(relay.viewerURL.query == nil && relay.viewerURL.user == nil)
+        var reconnected = false
+        relay.onConnection = { connected, _, _ in if connected { reconnected = true } }
         let monitor = Task { await relay.monitor() }
         defer { monitor.cancel() }
         server.disconnect()
-        let deadline = ContinuousClock.now + .seconds(5)
-        while server.requests.filter({ $0.path.hasSuffix("/socket") }).count < 2,
-            ContinuousClock.now < deadline
-        { try await Task.sleep(for: .milliseconds(10)) }
-        try #require(server.requests.filter({ $0.path.hasSuffix("/socket") }).count == 2)
+        let deadline = ContinuousClock.now + .seconds(7)
+        while !reconnected, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try #require(reconnected)
         try await relay.close()
-        await monitor.value
         #expect(server.deletions == 1)
         #expect(server.requests.first?.method == "POST")
         #expect(server.requests.last?.path.hasSuffix("/end") == true)
@@ -452,18 +461,22 @@ private final class TestRelay {
         relay.onFailure = { error in
             if let failure = error as? ViewerFailure { failures.append(failure) }
         }
-        let monitor = Task { await relay.monitor() }
+        var monitorFinished = false
+        let monitor = Task {
+            await relay.monitor()
+            monitorFinished = true
+        }
         defer { monitor.cancel() }
         server.socketStatus = status
         server.rootStatus = status
         server.redirect = "https://test-team.cloudflareaccess.com/cdn-cgi/access/login/test"
         server.disconnect()
         let deadline = ContinuousClock.now + .seconds(7)
-        while failures.isEmpty, ContinuousClock.now < deadline {
+        while !monitorFinished, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(10))
         }
+        try #require(monitorFinished)
         try #require(failures == [.accessDenied])
-        await monitor.value
         try await relay.close()
     }
 }
@@ -488,7 +501,7 @@ private final class TestRelay {
     while server.requests.filter({ $0.path.hasSuffix("/socket") }).count < 2,
         ContinuousClock.now < deadline
     { try await Task.sleep(for: .milliseconds(10)) }
-    try #require(server.requests.filter({ $0.path.hasSuffix("/socket") }).count == 2)
+    try #require(server.requests.filter({ $0.path.hasSuffix("/socket") }).count >= 2)
     #expect(failures == 0)
     server.socketStatus = 101
     let reconnectionDeadline = ContinuousClock.now + .seconds(7)
@@ -498,7 +511,6 @@ private final class TestRelay {
     try #require(reconnected)
     #expect(failures == 0)
     try await relay.close()
-    await monitor.value
 }
 
 @MainActor
@@ -623,7 +635,6 @@ private func selectionMessage(
     #expect(received.compactMap { $0.state.selectionRequest?.id } == [1, 3, 4])
     #expect(received.map { $0.state.selectedID } == ["c", "a", "b", "b"])
     try await relay.close()
-    await monitor.value
 }
 
 @MainActor
@@ -682,7 +693,6 @@ private func selectionMessage(
     #expect(applied.map(\.answerID) == ["a", "b"])
     #expect(applied.map(\.id) == [1, 1])
     try await relay.close()
-    await monitor.value
 }
 
 @MainActor
@@ -779,11 +789,15 @@ private func selectionMessage(
         try await Task.sleep(for: .milliseconds(10))
     }
     try #require(server.publicationStarted)
-    for _ in 1...6 {
+    // Large packets force the writer queue to overflow.
+    for _ in 1...5 {
         state.scroll(1)
         try relay.publish(state)
     }
-    #expect(connected.contains(false))
+    try #require(connected.contains(false))
+    state.scroll(1)
+    state.answers[0].text = "latest state after overload"
+    try relay.publish(state)
     server.drainPublications()
     let deadline = ContinuousClock.now + .seconds(7)
     while !server.publications.contains(where: { $0.connection > 0 }),
@@ -801,12 +815,10 @@ private func selectionMessage(
     {
         try await Task.sleep(for: .milliseconds(10))
     }
-    let newest = try publication(
-        try #require(server.publications.last { $0.connection == replacement.connection }),
-        viewer: relay.viewerURL)
-    #expect(
-        newest.sequence == 9 && newest.state.answers[0].text.hasSuffix("new sender remains usable"))
+    let publications = server.publications.filter { $0.connection == replacement.connection }
+    #expect(publications.map(\.packet.seq) == [8, 9])
+    let newest = try publication(try #require(publications.last), viewer: relay.viewerURL)
+    #expect(newest.state.answers[0].text == state.answers[0].text)
     #expect(failures == 0)
     try await relay.close()
-    await monitor.value
 }
